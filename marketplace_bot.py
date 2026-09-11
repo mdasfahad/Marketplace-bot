@@ -38,7 +38,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden
 
 # ================== CONFIG ==================
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # <-- BotFather token
+BOT_TOKEN = "8957497265:AAGWKalRRqWjXfORxcjwTdEo9aEYJ7c5M20"  # <-- BotFather token
 MAIN_ADMIN_ID = 8289191009
 DB_PATH = "marketplace.db"
 BOT_VERSION = "1.0.0"
