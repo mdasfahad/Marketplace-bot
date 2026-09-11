@@ -91,6 +91,7 @@ def init_db():
             balance REAL DEFAULT 0,
             is_blocked INTEGER DEFAULT 0,
             is_seller INTEGER DEFAULT 0,
+            referrer_id INTEGER,
             joined_at TEXT,
             last_active TEXT
         );
@@ -155,6 +156,21 @@ def init_db():
             key TEXT PRIMARY KEY,
             value TEXT
         );
+        CREATE TABLE IF NOT EXISTS force_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT,
+            title TEXT,
+            link TEXT,
+            is_active INTEGER DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            kind TEXT,
+            amount REAL,
+            note TEXT,
+            created_at TEXT
+        );
         CREATE TABLE IF NOT EXISTS chats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             order_id INTEGER,
@@ -168,6 +184,9 @@ def init_db():
     defaults = {
         "min_deposit": "50",
         "min_withdraw": "100",
+        "bot_enabled": "1",
+        "withdraw_enabled": "1",
+        "referral_bonus": "10",
         "support_username": "",
         "faq_text": (
             "ℹ️ <b>FAQ</b>\n\n"
@@ -260,22 +279,42 @@ def is_main(uid: int) -> bool:
     return uid == MAIN_ADMIN_ID
 
 
-def ensure_user(uid, username=None, full_name=None):
+def ensure_user(uid, username=None, full_name=None, referrer_id=None):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT user_id FROM users WHERE user_id=?", (uid,))
     if not cur.fetchone():
+        if referrer_id and int(referrer_id) == int(uid):
+            referrer_id = None
         cur.execute(
-            """INSERT INTO users (user_id, username, full_name, joined_at, last_active)
-               VALUES (?,?,?,?,?)""",
+            """INSERT INTO users (user_id, username, full_name, referrer_id, joined_at, last_active)
+               VALUES (?,?,?,?,?,?)""",
             (
                 uid,
                 username,
                 full_name,
+                referrer_id,
                 datetime.now().isoformat(),
                 datetime.now().isoformat(),
             ),
         )
+        if referrer_id:
+            try:
+                bonus = float(get_setting("referral_bonus", "10") or 0)
+            except Exception:
+                bonus = 10
+            if bonus > 0:
+                cur.execute(
+                    "UPDATE users SET balance = balance + ? WHERE user_id=?",
+                    (bonus, referrer_id),
+                )
+                try:
+                    cur.execute(
+                        "INSERT INTO history (user_id, kind, amount, note, created_at) VALUES (?,?,?,?,?)",
+                        (referrer_id, "referral", bonus, "ref %s" % uid, datetime.now().isoformat()),
+                    )
+                except Exception:
+                    pass
     else:
         cur.execute(
             "UPDATE users SET username=?, full_name=?, last_active=? WHERE user_id=?",
@@ -306,7 +345,7 @@ def user_kb(show_admin=False):
     rows = [
         ["💰 Wallet", "🛒 Market"],
         ["📤 Sell", "📦 My Products"],
-        ["🧾 Orders", "💬 My Chats"],
+        ["🧾 Orders", "👥 Referral"],
         ["💳 Deposit", "💸 Withdraw"],
         ["🆘 Support", "ℹ️ FAQ"],
     ]
@@ -315,36 +354,215 @@ def user_kb(show_admin=False):
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
-def admin_kb():
-    return ReplyKeyboardMarkup(
-        [
-            ["👥 Users", "📊 Stats"],
-            ["📥 Deposits", "💸 Withdrawals"],
-            ["🛍️ All Products", "📂 Categories"],
-            ["💳 Payment Methods", "⚙️ Settings"],
-            ["🔑 Gateway Keys", "📢 Broadcast"],
-            ["🏠 User Panel"],
-        ],
-        resize_keyboard=True,
-    )
+def admin_kb(main=False):
+    rows = [
+        ["👥 Users", "📄 Export Users"],
+        ["📊 Stats", "🛍️ All Products"],
+        ["➕ Admin Add Product", "📂 Categories"],
+        ["📥 Deposits", "💸 Withdrawals"],
+        ["💳 Payment Methods", "🔑 Gateway Keys"],
+        ["📢 Force Channels", "🎁 Referral Bonus"],
+        ["⚙️ Settings", "📢 Broadcast"],
+        ["🤖 Bot ON/OFF", "💸 WD ON/OFF"],
+    ]
+    if main:
+        rows.append(["👑 Add Admin", "🗑️ Remove Admin"])
+        rows.append(["🔄 Ownership Transfer"])
+    rows.append(["🏠 User Panel"])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+def get_force_channels():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM force_channels WHERE is_active=1")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+async def check_force_join(bot, user_id):
+    missing = []
+    for ch in get_force_channels():
+        raw = str(ch["chat_id"]).strip()
+        cands = []
+        if raw.lstrip("-").isdigit():
+            cands += [int(raw), raw]
+        else:
+            cands.append(raw if raw.startswith("@") else "@" + raw)
+        ok = False
+        for cid in cands:
+            try:
+                m = await bot.get_chat_member(chat_id=cid, user_id=user_id)
+                st = str(getattr(m, "status", m.status))
+                if st in ("member", "administrator", "creator", "ChatMemberStatus.MEMBER", "ChatMemberStatus.ADMINISTRATOR", "ChatMemberStatus.OWNER"):
+                    ok = True
+                    break
+                if hasattr(m.status, "name") and m.status.name in ("MEMBER", "ADMINISTRATOR", "OWNER"):
+                    ok = True
+                    break
+            except Exception:
+                pass
+        if not ok:
+            missing.append(ch)
+    return missing
 
 
 # ================== START ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    ensure_user(user.id, user.username, user.full_name)
+    ref = None
+    if context.args:
+        try:
+            ref = int(context.args[0])
+        except ValueError:
+            ref = None
+    ensure_user(user.id, user.username, user.full_name, ref)
     u = get_user(user.id)
     if u and u["is_blocked"]:
         await update.message.reply_text("আপনি ব্লকড।")
         return
+    if get_setting("bot_enabled", "1") != "1" and not is_admin(user.id):
+        await update.message.reply_text("🤖 বট এখন বন্ধ (Admin)।")
+        return
     if get_setting("maintenance") == "1" and not is_admin(user.id):
         await update.message.reply_text("🔧 Maintenance mode।")
+        return
+    missing = await check_force_join(context.bot, user.id)
+    if missing and not is_admin(user.id):
+        buttons = []
+        for ch in missing:
+            title = ch["title"] or ch["chat_id"]
+            link = ch["link"] or ""
+            if link:
+                buttons.append([InlineKeyboardButton("Join " + str(title), url=link)])
+            else:
+                buttons.append([InlineKeyboardButton(str(title), callback_data="noop")])
+        buttons.append([InlineKeyboardButton("✅ আমি জয়েন করেছি", callback_data="check_join")])
+        await update.message.reply_text(
+            "🔒 আগে চ্যানেল জয়েন করুন:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
         return
     await update.message.reply_text(
         get_setting("welcome_text"),
         parse_mode=ParseMode.HTML,
         reply_markup=user_kb(is_admin(user.id)),
     )
+
+
+async def check_join_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    missing = await check_force_join(context.bot, q.from_user.id)
+    if missing:
+        await q.answer("এখনো জয়েন করেননি!", show_alert=True)
+        return
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
+    await context.bot.send_message(
+        q.from_user.id,
+        get_setting("welcome_text"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=user_kb(is_admin(q.from_user.id)),
+    )
+
+
+async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    me = await context.bot.get_me()
+    link = "https://t.me/%s?start=%s" % (me.username, uid)
+    bonus = get_setting("referral_bonus", "10")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) c FROM users WHERE referrer_id=?", (uid,))
+    cnt = cur.fetchone()["c"]
+    conn.close()
+    await update.message.reply_text(
+        "👥 <b>Referral</b>\n\nলিংক:\n<code>%s</code>\n\nবোনাস: <b>%s</b> BDT\nমোট: %s" % (link, bonus, cnt),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    import io
+    from telegram import InputFile
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, username, full_name, balance, referrer_id, joined_at FROM users ORDER BY user_id")
+    rows = cur.fetchall()
+    conn.close()
+    lines = ["user_id\tusername\tfull_name\tbalance\treferrer\tjoined"]
+    for r in rows:
+        lines.append("%s\t%s\t%s\t%s\t%s\t%s" % (
+            r["user_id"], r["username"] or "", r["full_name"] or "",
+            r["balance"], r["referrer_id"] or "", r["joined_at"] or ""))
+    bio = io.BytesIO("\n".join(lines).encode("utf-8"))
+    bio.name = "users.txt"
+    await update.message.reply_document(document=InputFile(bio), caption="Users %s" % len(rows))
+
+
+async def toggle_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    cur = get_setting("bot_enabled", "1")
+    set_setting("bot_enabled", "0" if cur == "1" else "1")
+    await update.message.reply_text("🤖 bot_enabled = " + get_setting("bot_enabled"))
+
+
+async def toggle_wd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    cur = get_setting("withdraw_enabled", "1")
+    set_setting("withdraw_enabled", "0" if cur == "1" else "1")
+    await update.message.reply_text("💸 withdraw_enabled = " + get_setting("withdraw_enabled"))
+
+
+async def force_channels_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    chs = get_force_channels()
+    text = "📢 Force Channels\n\n"
+    buttons = []
+    for c in chs:
+        text += "#%s %s\n" % (c["id"], c["title"] or c["chat_id"])
+        buttons.append([InlineKeyboardButton("Remove #%s" % c["id"], callback_data="rmch_%s" % c["id"])])
+    buttons.append([InlineKeyboardButton("➕ Add Channel", callback_data="addch")])
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def rmch_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(q.from_user.id):
+        return
+    cid = int(q.data.split("_")[1])
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM force_channels WHERE id=?", (cid,))
+    conn.commit()
+    conn.close()
+    await q.edit_message_text("Removed")
+
+
+async def addch_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(q.from_user.id):
+        return
+    context.user_data["await_ch"] = True
+    await q.edit_message_text("Channel @username or -100id পাঠান (বট Admin হতে হবে):")
+
+
+async def ref_bonus_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    context.user_data["set_key"] = "referral_bonus"
+    await update.message.reply_text("বর্তমান: %s\nনতুন বোনাস লিখুন:" % get_setting("referral_bonus"))
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1082,6 +1300,9 @@ async def deprj_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== WITHDRAW ==================
 async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if get_setting("withdraw_enabled", "1") != "1":
+        await update.message.reply_text("💸 উইথড্র বন্ধ।")
+        return ConversationHandler.END
     u = get_user(update.effective_user.id)
     bal = u["balance"] if u else 0
     await update.message.reply_text(
@@ -1258,7 +1479,7 @@ async def faq_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    await update.message.reply_text("🔧 Admin Panel", reply_markup=admin_kb())
+    await update.message.reply_text("🔧 Admin Panel", reply_markup=admin_kb(is_main(update.effective_user.id)))
 
 
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1603,10 +1824,97 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔧 Maintenance")
         return
 
+    # generic setting value (referral bonus etc.)
+    if context.user_data.get("set_key") and is_admin(uid):
+        key = context.user_data.pop("set_key")
+        set_setting(key, text)
+        await update.message.reply_text("✅ %s = %s" % (key, text), reply_markup=admin_kb(is_main(uid)))
+        return
+
+
+    if context.user_data.get("await_add_admin") and is_main(uid):
+        context.user_data.pop("await_add_admin", None)
+        try:
+            aid = int(text)
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("INSERT OR REPLACE INTO admins (user_id, role, added_at) VALUES (?,?,?)",
+                        (aid, "admin", datetime.now().isoformat()))
+            conn.commit(); conn.close()
+            await update.message.reply_text("✅ Admin %s" % aid, reply_markup=admin_kb(True))
+        except Exception as e:
+            await update.message.reply_text("Error: %s" % e)
+        return
+    if context.user_data.get("await_rm_admin") and is_main(uid):
+        context.user_data.pop("await_rm_admin", None)
+        try:
+            aid = int(text)
+            if aid == MAIN_ADMIN_ID:
+                await update.message.reply_text("Main সরানো যাবে না")
+                return
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("DELETE FROM admins WHERE user_id=? AND role!='main'", (aid,))
+            conn.commit(); conn.close()
+            await update.message.reply_text("Removed %s" % aid, reply_markup=admin_kb(True))
+        except Exception as e:
+            await update.message.reply_text(str(e))
+        return
+    if context.user_data.get("await_transfer") and is_main(uid):
+        context.user_data.pop("await_transfer", None)
+        try:
+            new_id = int(text)
+            old = uid
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("INSERT OR REPLACE INTO admins (user_id, role, added_at) VALUES (?,?,?)",
+                        (new_id, "main", datetime.now().isoformat()))
+            cur.execute("UPDATE admins SET role='admin' WHERE user_id=?", (old,))
+            conn.commit(); conn.close()
+            await update.message.reply_text("✅ Ownership -> %s" % new_id, reply_markup=admin_kb(False))
+        except Exception as e:
+            await update.message.reply_text(str(e))
+        return
+
+    if text == "👑 Add Admin" and is_main(uid):
+        context.user_data["await_add_admin"] = True
+        await update.message.reply_text("Admin User ID:")
+        return
+    if text == "🗑️ Remove Admin" and is_main(uid):
+        context.user_data["await_rm_admin"] = True
+        await update.message.reply_text("Remove Admin User ID:")
+        return
+    if text == "🔄 Ownership Transfer" and is_main(uid):
+        context.user_data["await_transfer"] = True
+        await update.message.reply_text("New Main Admin User ID:")
+        return
+
+    # force channel add text
+    if context.user_data.get("await_ch") and is_admin(uid):
+        raw = text.strip()
+        context.user_data.pop("await_ch", None)
+        title, link = raw, ""
+        try:
+            chat = await context.bot.get_chat(int(raw) if raw.lstrip("-").isdigit() else raw)
+            title = chat.title or raw
+            if getattr(chat, "username", None):
+                link = "https://t.me/" + chat.username
+        except Exception as e:
+            await update.message.reply_text("⚠️ %s — saved with manual title" % e)
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO force_channels (chat_id, title, link) VALUES (?,?,?)",
+            (raw, title, link),
+        )
+        conn.commit()
+        conn.close()
+        await update.message.reply_text("✅ Channel: " + str(title), reply_markup=admin_kb(is_main(uid)))
+        return
+
     if text == "💰 Wallet":
         await wallet(update, context)
     elif text == "🛒 Market":
         await market(update, context)
+    elif text == "👥 Referral":
+        await referral_cmd(update, context)
     elif text == "📦 My Products":
         await my_products(update, context)
     elif text == "🧾 Orders":
@@ -1639,6 +1947,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_settings(update, context)
     elif text == "🔑 Gateway Keys" and is_admin(uid):
         await gateway_keys(update, context)
+    elif text == "📄 Export Users" and is_admin(uid):
+        await export_users(update, context)
+    elif text == "📢 Force Channels" and is_admin(uid):
+        await force_channels_menu(update, context)
+    elif text == "🎁 Referral Bonus" and is_admin(uid):
+        await ref_bonus_prompt(update, context)
+    elif text == "🤖 Bot ON/OFF" and is_admin(uid):
+        await toggle_bot(update, context)
+    elif text == "💸 WD ON/OFF" and is_admin(uid):
+        await toggle_wd(update, context)
+    elif text == "➕ Admin Add Product" and is_admin(uid):
+        await update.message.reply_text("Admin product: use 📤 Sell flow as admin (same), or list via Sell.")
+
 
 
 def main():
@@ -1753,7 +2074,12 @@ def main():
     app.add_handler(set_conv)
     app.add_handler(pm_conv)
 
+    app.add_handler(CallbackQueryHandler(check_join_cb, pattern=r"^check_join$"))
+    app.add_handler(CallbackQueryHandler(rmch_cb, pattern=r"^rmch_\d+$"))
+    app.add_handler(CallbackQueryHandler(addch_cb, pattern=r"^addch$"))
     app.add_handler(CallbackQueryHandler(cat_cb, pattern=r"^cat_\d+$"))
+    app.add_handler(CallbackQueryHandler(cat_cb, pattern=r"^cat_all$"))
+
     app.add_handler(CallbackQueryHandler(back_market_cb, pattern=r"^back_market$"))
     app.add_handler(CallbackQueryHandler(prod_cb, pattern=r"^prod_\d+$"))
     app.add_handler(CallbackQueryHandler(buy_cb, pattern=r"^buy_\d+$"))
