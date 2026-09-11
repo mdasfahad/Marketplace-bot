@@ -710,69 +710,203 @@ async def prod_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
     pid = int(q.data.split("_")[1])
+    uid = q.from_user.id
+
+    # prevent double-click race
+    lock_key = f"buying_{uid}_{pid}"
+    if context.user_data.get(lock_key):
+        await q.answer("⏳ প্রসেস হচ্ছে, অপেক্ষা করুন...", show_alert=True)
+        return
+    context.user_data[lock_key] = True
+
+    try:
+        await q.answer("⏳ কেনা হচ্ছে...")
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM products WHERE id=? AND is_active=1", (pid,))
+        p = cur.fetchone()
+        if not p:
+            conn.close()
+            await q.answer("প্রোডাক্ট নেই।", show_alert=True)
+            return
+        if p["seller_id"] == uid:
+            conn.close()
+            await q.answer("নিজের প্রোডাক্ট কিনতে পারবেন না।", show_alert=True)
+            return
+
+        # already bought this product? (optional one-time digital)
+        cur.execute(
+            "SELECT id FROM orders WHERE buyer_id=? AND product_id=? AND status='paid' ORDER BY id DESC LIMIT 1",
+            (uid, pid),
+        )
+        existing = cur.fetchone()
+        if existing:
+            conn.close()
+            await q.answer("আপনি ইতিমধ্যে কিনেছেন! Orders থেকে Delivery দেখুন।", show_alert=True)
+            try:
+                await context.bot.send_message(
+                    uid,
+                    f"ℹ️ Order #{existing['id']} আগেই কেনা আছে।\n"
+                    f"📦 Delivery আবার দেখতে: Orders → #{existing['id']}",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("📦 Delivery দেখুন", callback_data=f"dlv_{existing['id']}")]]
+                    ),
+                )
+            except Exception:
+                pass
+            return
+
+        cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
+        u = cur.fetchone()
+        bal = u["balance"] if u else 0
+        price = float(p["price"])
+        if bal < price:
+            conn.close()
+            await q.answer(f"ব্যালেন্স কম। দরকার {price:.0f}, আছে {bal:.0f}", show_alert=True)
+            return
+
+        # commission
+        try:
+            pct = float(get_setting("admin_commission_percent", "10") or 0)
+        except Exception:
+            pct = 10.0
+        if pct < 0:
+            pct = 0
+        if pct > 100:
+            pct = 100
+        commission = round(price * pct / 100.0, 2)
+        seller_gets = round(price - commission, 2)
+
+        cur.execute(
+            "UPDATE users SET balance = balance - ? WHERE user_id=? AND balance >= ?",
+            (price, uid, price),
+        )
+        if cur.rowcount == 0:
+            conn.close()
+            await q.answer("ব্যালেন্স কম / ডাবল ক্লিক।", show_alert=True)
+            return
+
+        cur.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id=?",
+            (seller_gets, p["seller_id"]),
+        )
+        if commission > 0:
+            # platform admin earns commission
+            cur.execute("SELECT user_id FROM users WHERE user_id=?", (MAIN_ADMIN_ID,))
+            if not cur.fetchone():
+                cur.execute(
+                    "INSERT OR IGNORE INTO users (user_id, username, joined_at, last_active) VALUES (?,?,?,?)",
+                    (MAIN_ADMIN_ID, "admin", datetime.now().isoformat(), datetime.now().isoformat()),
+                )
+            cur.execute(
+                "UPDATE users SET balance = balance + ? WHERE user_id=?",
+                (commission, MAIN_ADMIN_ID),
+            )
+
+        cur.execute(
+            """INSERT INTO orders (buyer_id, seller_id, product_id, amount, status, created_at)
+               VALUES (?,?,?,?, 'paid', ?)""",
+            (uid, p["seller_id"], pid, price, datetime.now().isoformat()),
+        )
+        order_id = cur.lastrowid
+        try:
+            cur.execute(
+                "INSERT INTO history (user_id, kind, amount, note, created_at) VALUES (?,?,?,?,?)",
+                (uid, "purchase", -price, f"order {order_id}", datetime.now().isoformat()),
+            )
+            cur.execute(
+                "INSERT INTO history (user_id, kind, amount, note, created_at) VALUES (?,?,?,?,?)",
+                (p["seller_id"], "sale", seller_gets, f"order {order_id} fee {commission}", datetime.now().isoformat()),
+            )
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+
+        delivery = p["delivery_info"] or "(সেলার ডেলিভারি দিবেন)"
+        success = (
+            f"✅ <b>কিনা সফল!</b>\n\n"
+            f"🧾 Order: <b>#{order_id}</b>\n"
+            f"📦 প্রোডাক্ট: <b>{p['title']}</b>\n"
+            f"💰 দাম: <b>{price:.2f} BDT</b>\n\n"
+            f"📥 <b>আপনার ডেলিভারি / ডাউনলোড ইনফো:</b>\n"
+            f"<code>{delivery}</code>\n\n"
+            f"💡 Orders মেনু থেকে আবার Delivery দেখতে পারবেন।\n"
+            f"সেলার চ্যাটও করা যাবে।"
+        )
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("📥 Delivery আবার দেখুন", callback_data=f"dlv_{order_id}")],
+                [InlineKeyboardButton("💬 Chat Seller", callback_data=f"chatord_{order_id}")],
+            ]
+        )
+        # photo messages cannot always edit_text — always send new clear message
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        try:
+            await q.edit_message_caption(caption=f"✅ কেনা হয়েছে! Order #{order_id}")
+        except Exception:
+            try:
+                await q.edit_message_text(f"✅ কেনা হয়েছে! Order #{order_id}")
+            except Exception:
+                pass
+
+        await context.bot.send_message(
+            uid, success, parse_mode=ParseMode.HTML, reply_markup=kb
+        )
+
+        try:
+            await context.bot.send_message(
+                p["seller_id"],
+                f"🎉 নতুন সেল!\nOrder #{order_id}\n"
+                f"প্রোডাক্ট: {p['title']}\n"
+                f"বায়ার: `{uid}`\n"
+                f"মোট: {price:.2f}\n"
+                f"আপনি পাবেন: {seller_gets:.2f} (কমিশন {commission:.2f})",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        if commission > 0:
+            try:
+                await context.bot.send_message(
+                    MAIN_ADMIN_ID,
+                    f"💼 কমিশন +{commission:.2f} BDT (Order #{order_id}, {pct}%)",
+                )
+            except Exception:
+                pass
+    finally:
+        context.user_data.pop(lock_key, None)
+
+
+async def delivery_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    oid = int(q.data.split("_")[1])
     uid = q.from_user.id
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM products WHERE id=? AND is_active=1", (pid,))
+    cur.execute("SELECT * FROM orders WHERE id=?", (oid,))
+    o = cur.fetchone()
+    if not o or o["buyer_id"] != uid:
+        conn.close()
+        await q.answer("অর্ডার নেই।", show_alert=True)
+        return
+    cur.execute("SELECT title, delivery_info FROM products WHERE id=?", (o["product_id"],))
     p = cur.fetchone()
-    if not p:
-        conn.close()
-        await q.edit_message_text("প্রোডাক্ট নেই।")
-        return
-    if p["seller_id"] == uid:
-        conn.close()
-        await q.answer("নিজের প্রোডাক্ট কিনতে পারবেন না।", show_alert=True)
-        return
-    cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
-    u = cur.fetchone()
-    bal = u["balance"] if u else 0
-    if bal < p["price"]:
-        conn.close()
-        await q.answer(
-            f"ব্যালেন্স কম। দরকার {p['price']:.0f}, আছে {bal:.0f}",
-            show_alert=True,
-        )
-        return
-    # deduct buyer, credit seller
-    cur.execute(
-        "UPDATE users SET balance = balance - ? WHERE user_id=?", (p["price"], uid)
-    )
-    cur.execute(
-        "UPDATE users SET balance = balance + ? WHERE user_id=?",
-        (p["price"], p["seller_id"]),
-    )
-    cur.execute(
-        """INSERT INTO orders (buyer_id, seller_id, product_id, amount, status, created_at)
-           VALUES (?,?,?,?, 'paid', ?)""",
-        (uid, p["seller_id"], pid, p["price"], datetime.now().isoformat()),
-    )
-    order_id = cur.lastrowid
-    conn.commit()
     conn.close()
-
-    delivery = p["delivery_info"] or "(সেলার ডেলিভারি দিবেন)"
-    await q.edit_message_text(
-        f"✅ <b>কিনা সম্পন্ন!</b>\nOrder #{order_id}\n"
-        f"প্রোডাক্ট: {p['title']}\nদাম: {p['price']:.2f}\n\n"
-        f"📦 <b>Delivery:</b>\n{delivery}\n\n"
-        f"সেলারের সাথে চ্যাট: Orders → Contact",
+    title = p["title"] if p else "-"
+    delivery = (p["delivery_info"] if p else None) or "(কোনো ডেলিভারি ইনফো নেই)"
+    await context.bot.send_message(
+        uid,
+        f"📥 <b>Delivery — Order #{oid}</b>\n"
+        f"প্রোডাক্ট: {title}\n\n"
+        f"<code>{delivery}</code>",
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("💬 Chat Seller", callback_data=f"chatord_{order_id}")]]
-        ),
     )
-    try:
-        await context.bot.send_message(
-            p["seller_id"],
-            f"🎉 নতুন সেল!\nOrder #{order_id}\n"
-            f"প্রোডাক্ট: {p['title']}\n"
-            f"বায়ার: `{uid}`\nAmount: {p['price']:.2f}",
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception:
-        pass
 
 
 # ================== SELL ==================
@@ -1620,6 +1754,7 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     buttons = [
         [InlineKeyboardButton("Min Deposit", callback_data="set_min_deposit")],
+        [InlineKeyboardButton("Admin Commission %", callback_data="set_admin_commission_percent")],
         [InlineKeyboardButton("Min Withdraw", callback_data="set_min_withdraw")],
         [InlineKeyboardButton("Support Username", callback_data="set_support_username")],
         [InlineKeyboardButton("FAQ Text", callback_data="set_faq_text")],
@@ -2042,7 +2177,7 @@ def main():
         entry_points=[
             CallbackQueryHandler(
                 set_field_cb,
-                pattern=r"^(set_min_deposit|set_min_withdraw|set_support_username|set_faq_text|set_gateway_nagorik_api|set_gateway_nagorik_secret)$",
+                pattern=r"^(set_min_deposit|set_min_withdraw|set_support_username|set_faq_text|set_gateway_nagorik_api|set_gateway_nagorik_secret|set_admin_commission_percent)$",
             )
         ],
         states={
@@ -2083,6 +2218,7 @@ def main():
     app.add_handler(CallbackQueryHandler(back_market_cb, pattern=r"^back_market$"))
     app.add_handler(CallbackQueryHandler(prod_cb, pattern=r"^prod_\d+$"))
     app.add_handler(CallbackQueryHandler(buy_cb, pattern=r"^buy_\d+$"))
+    app.add_handler(CallbackQueryHandler(delivery_cb, pattern=r"^dlv_\d+$"))
     app.add_handler(CallbackQueryHandler(myprod_cb, pattern=r"^myprod_\d+$"))
     app.add_handler(CallbackQueryHandler(ptog_cb, pattern=r"^ptog_\d+$"))
     app.add_handler(CallbackQueryHandler(pdel_cb, pattern=r"^pdel_\d+$"))
