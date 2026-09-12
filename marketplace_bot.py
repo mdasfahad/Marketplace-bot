@@ -62,6 +62,7 @@ logger = logging.getLogger(__name__)
     SELL_DESC,
     SELL_PRICE,
     SELL_DURATION,
+    SELL_STOCK,
     SELL_PHOTO,
     SELL_DELIVERY,
     CHAT_MSG,
@@ -69,7 +70,14 @@ logger = logging.getLogger(__name__)
     SET_VALUE,
     ADD_PAY_NAME,
     ADD_PAY_INFO,
-) = range(18)
+    EDIT_STOCK,
+    EDIT_PRICE,
+    EDIT_TITLE,
+    EDIT_DELIVERY,
+    BAL_USER,
+    BAL_AMT,
+    BLOCK_USER,
+) = range(26)
 
 
 # ================== DB ==================
@@ -189,19 +197,27 @@ def init_db():
         "referral_bonus": "10",
         "support_username": "",
         "faq_text": (
-            "ℹ️ <b>FAQ</b>\n\n"
-            "• 💰 Wallet — ব্যালেন্স দেখুন\n"
-            "• 🛒 Market — প্রোডাক্ট কিনুন\n"
-            "• 📤 Sell — প্রোডাক্ট সেল করুন\n"
-            "• 📦 My Products — আপনার লিস্টিং\n"
-            "• 🧾 Orders — কেনা/বেচার অর্ডার\n"
-            "• 💳 Deposit — ব্যালেন্স যোগ\n"
-            "• 💸 Withdraw — উইথড্র রিকোয়েস্ট\n"
-            "• 🆘 Support — সাপোর্ট\n\n"
-            "শুধু বৈধ ডিজিটাল প্রোডাক্ট সেল করুন।"
+            "ℹ️ <b>FAQ — কীভাবে ব্যবহার করবেন</b>\n\n"
+            "💰 <b>Wallet</b> — ব্যালেন্স দেখুন\n"
+            "🛒 <b>Market</b> — ক্যাটাগরি বেছে প্রোডাক্ট কিনুন (ব্যালেন্স লাগবে)\n"
+            "📤 <b>Sell</b> — প্রোডাক্ট লিস্ট করুন + স্টক সংখ্যা দিন\n"
+            "📦 <b>My Products</b> — এডিট/স্টক বাড়ান/অফ করুন\n"
+            "🧾 <b>Orders</b> — কেনা ও বেচার অর্ডার\n"
+            "📜 <b>History</b> — কেনাকাটা ও সেল আলাদা\n"
+            "💳 <b>Deposit</b> — মেথড বেছে টাকা পাঠিয়ে TrxID+স্ক্রিনশট দিন\n"
+            "💸 <b>Withdraw</b> — উইথড্র রিকোয়েস্ট\n"
+            "👥 <b>Referral</b> — লিংক শেয়ার; রেফার্ড কিনলে কমিশন\n"
+            "🔄 <b>Update</b> — বট আপডেট চেক\n"
+            "👨‍💻 <b>Developer</b> — ডেভেলপারের সাথে যোগাযোগ\n"
+            "🆘 Support / ℹ️ FAQ — সাহায্য\n\n"
+            "শুধু বৈধ ডিজিটাল প্রোডাক্ট।"
         ),
         "welcome_text": "🛒 <b>Digital Marketplace</b>\nবৈধ ডিজিটাল প্রোডাক্ট কিনুন ও বিক্রি করুন।",
         "admin_commission_percent": "10",
+        "update_text": "✅ Bot already up to date.\nকোনো নতুন আপডেট নেই।",
+        "developer_prefill": "আমি ওয়েবসাইট বা বট বানাতে চাই",
+        "developer_username": "",
+        "referral_shop_percent": "5",
         "gateway_nagorik_api": "",
         "gateway_nagorik_secret": "",
         "gateway_rupantor_api": "",
@@ -234,6 +250,17 @@ def init_db():
             )
 
     # payment methods: admin sets up manually (no default seed)
+
+
+    # migrations
+    try:
+        cur.execute("ALTER TABLE products ADD COLUMN stock INTEGER DEFAULT 1")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE payment_methods ADD COLUMN min_amount REAL DEFAULT 0")
+    except Exception:
+        pass
 
     conn.commit()
     conn.close()
@@ -340,9 +367,10 @@ def user_kb(show_admin=False):
         ["💰 Wallet", "👤 Profile"],
         ["🛒 Market", "📤 Sell"],
         ["📦 My Products", "🧾 Orders"],
-        ["👥 Referral", "💳 Deposit"],
-        ["💸 Withdraw", "🆘 Support"],
-        ["ℹ️ FAQ"],
+        ["📜 History", "👥 Referral"],
+        ["💳 Deposit", "💸 Withdraw"],
+        ["🆘 Support", "ℹ️ FAQ"],
+        ["🔄 Update", "👨‍💻 Developer"],
     ]
     if show_admin:
         rows.append(["🔧 Admin Panel"])
@@ -703,11 +731,16 @@ async def prod_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not p or not p["is_active"]:
         await q.edit_message_text("প্রোডাক্ট পাওয়া যায়নি।")
         return
+    try:
+        stock = int(p["stock"] if p["stock"] is not None else 1)
+    except Exception:
+        stock = 1
     text = (
         f"📦 <b>{p['title']}</b>\n"
         f"ক্যাটাগরি: {p['cname']}\n"
         f"দাম: <b>{p['price']:.2f} BDT</b>\n"
         f"মেয়াদ: {p['duration']}\n"
+        f"স্টক: <b>{stock}</b>\n"
         f"সেলার: @{p['suser'] or p['seller_id']}\n\n"
         f"{p['description'] or ''}"
     )
@@ -760,29 +793,18 @@ async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("নিজের প্রোডাক্ট কিনতে পারবেন না।", show_alert=True)
             return
 
-        # already bought this product? (optional one-time digital)
-        cur.execute(
-            "SELECT id FROM orders WHERE buyer_id=? AND product_id=? AND status='paid' ORDER BY id DESC LIMIT 1",
-            (uid, pid),
-        )
-        existing = cur.fetchone()
-        if existing:
+        # stock check
+        try:
+            stock = int(p["stock"] if p["stock"] is not None else 1)
+        except Exception:
+            stock = 1
+        if stock < 1:
             conn.close()
-            await q.answer("আপনি ইতিমধ্যে কিনেছেন! Orders থেকে Delivery দেখুন।", show_alert=True)
-            try:
-                await context.bot.send_message(
-                    uid,
-                    f"ℹ️ Order #{existing['id']} আগেই কেনা আছে।\n"
-                    f"📦 Delivery আবার দেখতে: Orders → #{existing['id']}",
-                    reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("📦 Delivery দেখুন", callback_data=f"dlv_{existing['id']}")]]
-                    ),
-                )
-            except Exception:
-                pass
+            await q.answer("স্টক শেষ!", show_alert=True)
             return
 
-        cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
+        cur.execute("SELECT balance, referrer_id FROM users WHERE user_id=?", (uid,))
+
         u = cur.fetchone()
         bal = u["balance"] if u else 0
         price = float(p["price"])
@@ -810,6 +832,16 @@ async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if cur.rowcount == 0:
             conn.close()
             await q.answer("ব্যালেন্স কম / ডাবল ক্লিক।", show_alert=True)
+            return
+
+        cur.execute(
+            "UPDATE products SET stock = stock - 1 WHERE id=? AND stock >= 1",
+            (pid,),
+        )
+        if cur.rowcount == 0:
+            conn.rollback()
+            conn.close()
+            await q.answer("স্টক শেষ!", show_alert=True)
             return
 
         cur.execute(
@@ -846,6 +878,33 @@ async def buy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
+
+        # referral shopping commission
+        try:
+            ref_id = u["referrer_id"] if u else None
+            if ref_id and ref_id != uid:
+                rshop = float(get_setting("referral_shop_percent", "5") or 0)
+                if rshop > 0:
+                    rbonus = round(price * rshop / 100.0, 2)
+                    if rbonus > 0:
+                        cur.execute(
+                            "UPDATE users SET balance = balance + ? WHERE user_id=?",
+                            (rbonus, ref_id),
+                        )
+                        cur.execute(
+                            "INSERT INTO history (user_id, kind, amount, note, created_at) VALUES (?,?,?,?,?)",
+                            (ref_id, "ref_shop", rbonus, f"order {order_id}", datetime.now().isoformat()),
+                        )
+                        try:
+                            await context.bot.send_message(
+                                ref_id,
+                                f"🎁 রেফার কমিশন +{rbonus:.2f} BDT (Order #{order_id})",
+                            )
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
         conn.commit()
         conn.close()
 
@@ -992,8 +1051,21 @@ async def sell_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def sell_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["sell_duration"] = update.message.text.strip()[:80]
     await update.message.reply_text(
-        "প্রোডাক্টের ছবি পাঠান (অথবা /skip):"
+        "📦 স্টক কতগুলো আছে? (সংখ্যা লিখুন, যেমন: 1 বা 10):"
     )
+    return SELL_STOCK
+
+
+async def sell_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        stock = int(update.message.text.strip())
+        if stock < 1:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("সঠিক স্টক সংখ্যা লিখুন (কমপক্ষে 1)।")
+        return SELL_STOCK
+    context.user_data["sell_stock"] = stock
+    await update.message.reply_text("প্রোডাক্টের ছবি পাঠান (অথবা /skip):")
     return SELL_PHOTO
 
 
@@ -1022,8 +1094,8 @@ async def sell_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.execute(
         """INSERT INTO products
         (seller_id, category_id, title, description, price, duration,
-         photo_file_id, delivery_info, is_active, created_at)
-        VALUES (?,?,?,?,?,?,?,?,1,?)""",
+         photo_file_id, delivery_info, is_active, created_at, stock)
+        VALUES (?,?,?,?,?,?,?,?,1,?,?)""",
         (
             uid,
             context.user_data["sell_cat"],
@@ -1034,6 +1106,7 @@ async def sell_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.get("sell_photo"),
             delivery,
             datetime.now().isoformat(),
+            int(context.user_data.get("sell_stock") or 1),
         ),
     )
     pid = cur.lastrowid
@@ -1066,10 +1139,14 @@ async def my_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     for p in rows:
         st = "✅" if p["is_active"] else "⏸"
+        try:
+            sk = int(p["stock"] if p["stock"] is not None else 1)
+        except Exception:
+            sk = 1
         buttons.append(
             [
                 InlineKeyboardButton(
-                    f"{st} {p['title'][:24]} ({p['price']:.0f})",
+                    f"{st} {p['title'][:20]} ({p['price']:.0f}) stock:{sk}",
                     callback_data=f"myprod_{p['id']}",
                 )
             ]
@@ -1101,11 +1178,15 @@ async def myprod_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data=f"ptog_{pid}",
             )
         ],
+        [InlineKeyboardButton("📦 Edit Stock", callback_data=f"peditstock_{pid}")],
+        [InlineKeyboardButton("💰 Edit Price", callback_data=f"peditprice_{pid}")],
+        [InlineKeyboardButton("📝 Edit Title", callback_data=f"pedittitle_{pid}")],
+        [InlineKeyboardButton("📥 Edit Delivery", callback_data=f"peditdlv_{pid}")],
         [InlineKeyboardButton("🗑 Delete", callback_data=f"pdel_{pid}")],
     ]
     await q.edit_message_text(
         f"#{p['id']} <b>{p['title']}</b>\n"
-        f"Price: {p['price']}\nActive: {p['is_active']}\n{p['description'][:200]}",
+        f"Price: {p['price']}\nStock: {p['stock'] if p['stock'] is not None else 1}\nActive: {p['is_active']}\n{(p['description'] or '')[:200]}",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(buttons),
     )
@@ -1141,6 +1222,110 @@ async def pdel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================== ORDERS ==================
+
+async def pedit_prompt_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    parts = q.data.split("_")
+    # peditstock_1 / peditprice_1 / pedittitle_1 / peditdlv_1
+    kind = parts[0].replace("pedit", "")  # stock/price/title/dlv
+    pid = int(parts[1])
+    uid = q.from_user.id
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM products WHERE id=? AND seller_id=?", (pid, uid))
+    if not cur.fetchone():
+        conn.close()
+        await q.edit_message_text("নেই।")
+        return
+    conn.close()
+    context.user_data["edit_pid"] = pid
+    if "stock" in q.data:
+        context.user_data["edit_field"] = "stock"
+        await q.edit_message_text("নতুন স্টক সংখ্যা লিখুন:")
+        return EDIT_STOCK
+    if "price" in q.data:
+        context.user_data["edit_field"] = "price"
+        await q.edit_message_text("নতুন দাম লিখুন:")
+        return EDIT_PRICE
+    if "title" in q.data:
+        context.user_data["edit_field"] = "title"
+        await q.edit_message_text("নতুন টাইটেল লিখুন:")
+        return EDIT_TITLE
+    if "dlv" in q.data:
+        context.user_data["edit_field"] = "delivery"
+        await q.edit_message_text("নতুন ডেলিভারি ইনফো লিখুন:")
+        return EDIT_DELIVERY
+    return ConversationHandler.END
+
+
+async def edit_stock_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        v = int(update.message.text.strip())
+        if v < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("সঠিক সংখ্যা লিখুন।")
+        return EDIT_STOCK
+    pid = context.user_data.get("edit_pid")
+    uid = update.effective_user.id
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE products SET stock=? WHERE id=? AND seller_id=?", (v, pid, uid))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(f"✅ স্টক = {v}", reply_markup=user_kb(is_admin(uid)))
+    return ConversationHandler.END
+
+
+async def edit_price_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        v = float(update.message.text.strip())
+        if v <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("সঠিক দাম লিখুন।")
+        return EDIT_PRICE
+    pid = context.user_data.get("edit_pid")
+    uid = update.effective_user.id
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE products SET price=? WHERE id=? AND seller_id=?", (v, pid, uid))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(f"✅ দাম = {v}", reply_markup=user_kb(is_admin(uid)))
+    return ConversationHandler.END
+
+
+async def edit_title_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    v = update.message.text.strip()[:120]
+    pid = context.user_data.get("edit_pid")
+    uid = update.effective_user.id
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE products SET title=? WHERE id=? AND seller_id=?", (v, pid, uid))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text("✅ টাইটেল আপডেট", reply_markup=user_kb(is_admin(uid)))
+    return ConversationHandler.END
+
+
+async def edit_delivery_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    v = update.message.text.strip()[:3000]
+    pid = context.user_data.get("edit_pid")
+    uid = update.effective_user.id
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE products SET delivery_info=? WHERE id=? AND seller_id=?", (v, pid, uid)
+    )
+    conn.commit()
+    conn.close()
+    await update.message.reply_text("✅ ডেলিভারি আপডেট", reply_markup=user_kb(is_admin(uid)))
+    return ConversationHandler.END
+
+
+
 async def orders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     conn = get_db()
@@ -1327,6 +1512,16 @@ async def dep_method_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     context.user_data["dep_method"] = m["name"]
     context.user_data["dep_info"] = m["info"]
+    try:
+        mmin = float(m["min_amount"] or 0)
+    except Exception:
+        mmin = 0
+    if mmin <= 0:
+        try:
+            mmin = float(get_setting("min_deposit", "50") or 50)
+        except Exception:
+            mmin = 50
+    context.user_data["dep_min"] = mmin
     await q.edit_message_text(
         f"মেথড: <b>{m['name']}</b>\n\n{m['info']}\n\n"
         f"পরিমাণ লিখুন (min {get_setting('min_deposit')}):",
@@ -1338,7 +1533,7 @@ async def dep_method_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def dep_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amt = float(update.message.text.strip())
-        mn = float(get_setting("min_deposit", "50"))
+        mn = float(context.user_data.get("dep_min") or get_setting("min_deposit", "50") or 50)
         if amt < mn:
             raise ValueError
     except ValueError:
@@ -1781,6 +1976,10 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [
         [InlineKeyboardButton("Min Deposit", callback_data="set_min_deposit")],
         [InlineKeyboardButton("Admin Commission %", callback_data="set_admin_commission_percent")],
+        [InlineKeyboardButton("Referral Shop %", callback_data="set_referral_shop_percent")],
+        [InlineKeyboardButton("Developer Username", callback_data="set_developer_username")],
+        [InlineKeyboardButton("Developer Prefill Text", callback_data="set_developer_prefill")],
+        [InlineKeyboardButton("Update Message Text", callback_data="set_update_text")],
         [InlineKeyboardButton("Min Withdraw", callback_data="set_min_withdraw")],
         [InlineKeyboardButton("Support Username", callback_data="set_support_username")],
         [InlineKeyboardButton("FAQ Text", callback_data="set_faq_text")],
@@ -1923,13 +2122,14 @@ async def payment_methods_admin(update: Update, context: ContextTypes.DEFAULT_TY
     if not rows:
         body += "⚠️ কোনো মেথড নেই — আগে Add করুন।\n"
     for m in rows:
-        body += f"#{m['id']} <b>{m['name']}</b> [{'ON' if m['is_active'] else 'OFF'}]\n{m['info'][:70]}\n\n"
+        body += f"#{m['id']} <b>{m['name']}</b> [{'ON' if m['is_active'] else 'OFF'}] min={m['min_amount'] or 0}\n{m['info'][:70]}\n\n"
         buttons.append([
             InlineKeyboardButton(
                 f"{'⏸' if m['is_active'] else '▶️'} {m['name']}",
                 callback_data=f"pmtog_{m['id']}",
             ),
             InlineKeyboardButton("🗑", callback_data=f"pmdel_{m['id']}"),
+            InlineKeyboardButton("Min৳", callback_data=f"pmmin_{m['id']}"),
         ])
     buttons.append([InlineKeyboardButton("➕ Add Method", callback_data="pm_add")])
     await update.message.reply_text(
@@ -1952,6 +2152,16 @@ async def pmtog_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     await q.answer("টগল OK", show_alert=False)
     await q.edit_message_text("✅ টগল হয়েছে। আবার 💳 Payment Methods খুলুন।")
+
+
+async def pmmin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(q.from_user.id):
+        return
+    mid = int(q.data.split("_")[1])
+    context.user_data["set_key"] = f"__pmmin_{mid}"
+    await q.edit_message_text("এই মেথডের minimum deposit লিখুন (যেমন 50 বা 140):")
 
 
 async def pmdel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2077,6 +2287,151 @@ async def cat_add_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================== ROUTER ==================
+
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM history WHERE user_id=? AND kind IN ('purchase','sale') ORDER BY id DESC LIMIT 30",
+        (uid,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    buys = [r for r in rows if r["kind"] == "purchase"]
+    sales = [r for r in rows if r["kind"] == "sale"]
+    msg = "📜 <b>History</b>\n\n🛒 <b>কেনাকাটা</b>\n"
+    if not buys:
+        msg += "কিছু নেই\n"
+    for r in buys[:15]:
+        msg += f"• {r['amount']} — {r['note']} ({str(r['created_at'])[:16]})\n"
+    msg += "\n📤 <b>বেচা</b>\n"
+    if not sales:
+        msg += "কিছু নেই\n"
+    for r in sales[:15]:
+        msg += f"• +{r['amount']} — {r['note']} ({str(r['created_at'])[:16]})\n"
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+
+async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🔄 Checking for updates...")
+    import asyncio
+    await asyncio.sleep(1.2)
+    try:
+        await msg.edit_text("⏳ Loading...")
+        await asyncio.sleep(0.8)
+    except Exception:
+        pass
+    text_u = get_setting(
+        "update_text",
+        "✅ Bot already up to date.\nকোনো নতুন আপডেট নেই।",
+    )
+    try:
+        await msg.edit_text(text_u)
+    except Exception:
+        await update.message.reply_text(text_u)
+
+
+async def developer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uname = (get_setting("developer_username") or "").strip().lstrip("@")
+    prefill = get_setting(
+        "developer_prefill", "আমি ওয়েবসাইট বা বট বানাতে চাই"
+    )
+    if not uname:
+        await update.message.reply_text(
+            "👨‍💻 Developer এখনো সেট করা হয়নি। Admin সেট করবে।"
+        )
+        return
+    from urllib.parse import quote
+    link = f"https://t.me/{uname}?text={quote(prefill)}"
+    await update.message.reply_text(
+        f"👨‍💻 <b>Developer</b>\n@{uname}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("✉️ Message Developer", url=link)]]
+        ),
+    )
+
+
+async def admin_bal_start(update: Update, context: ContextTypes.DEFAULT_TYPE, mode="add"):
+    if not is_admin(update.effective_user.id):
+        return
+    context.user_data["bal_mode"] = mode
+    await update.message.reply_text("ইউজার ID লিখুন:")
+    return BAL_USER
+
+
+async def admin_bal_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        context.user_data["bal_uid"] = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("সঠিক User ID লিখুন।")
+        return BAL_USER
+    await update.message.reply_text("পরিমাণ লিখুন:")
+    return BAL_AMT
+
+
+async def admin_bal_amt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amt = float(update.message.text.strip())
+        if amt <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("সঠিক পরিমাণ।")
+        return BAL_AMT
+    uid = context.user_data.get("bal_uid")
+    mode = context.user_data.get("bal_mode", "add")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        await update.message.reply_text("ইউজার নেই।", reply_markup=admin_kb())
+        return ConversationHandler.END
+    if mode == "add":
+        cur.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amt, uid))
+    else:
+        cur.execute(
+            "UPDATE users SET balance = MAX(0, balance - ?) WHERE user_id=?", (amt, uid)
+        )
+    conn.commit()
+    cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
+    nb = cur.fetchone()["balance"]
+    conn.close()
+    await update.message.reply_text(
+        f"✅ User {uid} balance = {nb:.2f}", reply_markup=admin_kb(is_main(update.effective_user.id))
+    )
+    return ConversationHandler.END
+
+
+async def block_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE, block=True):
+    if not is_admin(update.effective_user.id):
+        return
+    context.user_data["block_mode"] = 1 if block else 0
+    await update.message.reply_text("ইউজার ID লিখুন:")
+    return BLOCK_USER
+
+
+async def block_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        uid = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("সঠিক ID।")
+        return BLOCK_USER
+    mode = context.user_data.get("block_mode", 1)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET is_blocked=? WHERE user_id=?", (mode, uid))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(
+        f"{'🚫 Blocked' if mode else '✅ Unblocked'} {uid}",
+        reply_markup=admin_kb(is_main(update.effective_user.id)),
+    )
+    return ConversationHandler.END
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     uid = update.effective_user.id
@@ -2112,6 +2467,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # generic setting value (referral bonus etc.)
     if context.user_data.get("set_key") and is_admin(uid):
         key = context.user_data.pop("set_key")
+        if str(key).startswith("__pmmin_"):
+            try:
+                mid = int(str(key).split("_")[-1])
+                val = float(text.strip())
+                conn = get_db()
+                cur = conn.cursor()
+                cur.execute("UPDATE payment_methods SET min_amount=? WHERE id=?", (val, mid))
+                conn.commit()
+                conn.close()
+                await update.message.reply_text(f"✅ Method #{mid} min deposit = {val}", reply_markup=admin_kb(is_main(uid)))
+            except Exception as e:
+                await update.message.reply_text("Error: %s" % e)
+            return
         set_setting(key, text)
         await update.message.reply_text("✅ %s = %s" % (key, text), reply_markup=admin_kb(is_main(uid)))
         return
@@ -2198,6 +2566,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await wallet(update, context)
     elif text == "👤 Profile":
         await profile_cmd(update, context)
+    elif text == "📜 History":
+        await history_cmd(update, context)
+    elif text == "🔄 Update":
+        await update_cmd(update, context)
+    elif text == "👨‍💻 Developer":
+        await developer_cmd(update, context)
     elif text == "🛒 Market":
         await market(update, context)
     elif text == "👥 Referral":
@@ -2230,6 +2604,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await categories_admin(update, context)
     elif text == "💳 Payment Methods" and is_admin(uid):
         await payment_methods_admin(update, context)
+    elif text == "💵 Add Balance" and is_admin(uid):
+        return await admin_bal_start(update, context, "add")
+    elif text == "💵 Remove Balance" and is_admin(uid):
+        return await admin_bal_start(update, context, "remove")
+    elif text == "🚫 Block User" and is_admin(uid):
+        return await block_user_start(update, context, True)
+    elif text == "✅ Unblock User" and is_admin(uid):
+        return await block_user_start(update, context, False)
     elif text == "⚙️ Settings" and is_admin(uid):
         await admin_settings(update, context)
     elif text == "🔑 Gateway Keys" and is_admin(uid):
@@ -2259,6 +2641,47 @@ def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
+
+    edit_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(pedit_prompt_cb, pattern=r"^pedit(stock|price|title|dlv)_\d+$"),
+        ],
+        states={
+            EDIT_STOCK: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_stock_val)],
+            EDIT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_price_val)],
+            EDIT_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_title_val)],
+            EDIT_DELIVERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_delivery_val)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        allow_reentry=True,
+    )
+
+    bal_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex("^💵 Add Balance$"), lambda u,c: admin_bal_start(u,c,"add")),
+            MessageHandler(filters.Regex("^💵 Remove Balance$"), lambda u,c: admin_bal_start(u,c,"remove")),
+        ],
+        states={
+            BAL_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_bal_user)],
+            BAL_AMT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_bal_amt)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        allow_reentry=True,
+    )
+
+    block_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex("^🚫 Block User$"), lambda u,c: block_user_start(u,c,True)),
+            MessageHandler(filters.Regex("^✅ Unblock User$"), lambda u,c: block_user_start(u,c,False)),
+        ],
+        states={
+            BLOCK_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, block_user_id)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        allow_reentry=True,
+    )
+
+
     sell_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^📤 Sell$"), sell_start),
@@ -2271,6 +2694,9 @@ def main():
             SELL_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_price)],
             SELL_DURATION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, sell_duration)
+            ],
+            SELL_STOCK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, sell_stock)
             ],
             SELL_PHOTO: [
                 MessageHandler(filters.PHOTO, sell_photo),
@@ -2335,7 +2761,7 @@ def main():
         entry_points=[
             CallbackQueryHandler(
                 set_field_cb,
-                pattern=r"^(set_min_deposit|set_min_withdraw|set_support_username|set_faq_text|set_gateway_nagorik_api|set_gateway_nagorik_secret|set_admin_commission_percent|set_gateway_rupantor_api|set_gateway_rupantor_secret|set_gateway_daweblab_api|set_gateway_daweblab_secret)$",
+                pattern=r"^(set_min_deposit|set_min_withdraw|set_support_username|set_faq_text|set_gateway_nagorik_api|set_gateway_nagorik_secret|set_admin_commission_percent|set_gateway_rupantor_api|set_gateway_rupantor_secret|set_gateway_daweblab_api|set_gateway_daweblab_secret|set_referral_shop_percent|set_developer_username|set_developer_prefill|set_update_text)$",
             )
         ],
         states={
@@ -2359,6 +2785,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(edit_conv)
+    app.add_handler(bal_conv)
+    app.add_handler(block_conv)
     app.add_handler(sell_conv)
     app.add_handler(dep_conv)
     app.add_handler(wd_conv)
@@ -2386,6 +2815,7 @@ def main():
     app.add_handler(CallbackQueryHandler(wdrj_cb, pattern=r"^wdrj_\d+$"))
     app.add_handler(CallbackQueryHandler(pmtog_cb, pattern=r"^pmtog_\d+$"))
     app.add_handler(CallbackQueryHandler(pmdel_cb, pattern=r"^pmdel_\d+$"))
+    app.add_handler(CallbackQueryHandler(pmmin_cb, pattern=r"^pmmin_\d+$"))
     app.add_handler(CallbackQueryHandler(cattog_cb, pattern=r"^cattog_\d+$"))
     app.add_handler(CallbackQueryHandler(catdel_cb, pattern=r"^catdel_\d+$"))
     app.add_handler(CallbackQueryHandler(cat_add_cb, pattern=r"^cat_add$"))
