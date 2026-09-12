@@ -43,7 +43,9 @@ from telegram.error import BadRequest, Forbidden
 # ================== CONFIG ==================
 BOT_TOKEN = "8957497265:AAGWKalRRqWjXfORxcjwTdEo9aEYJ7c5M20"  # <-- BotFather token
 MAIN_ADMIN_ID = 8289191009
-DB_PATH = "marketplace.db"
+import os
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "marketplace.db")
+# restart e data thakbe - ei file delete korben na
 BOT_VERSION = "1.0.0"
 
 logging.basicConfig(
@@ -513,22 +515,22 @@ def add_balance(uid: int, amount: float, note: str = ""):
 
 MENU = {
     "bn": {
-        "wallet": "💰 Wallet",
-        "profile": "👤 Profile",
-        "market": "🛒 Market",
-        "sell": "📤 Sell",
-        "my_products": "📦 My Products",
-        "orders": "🧾 Orders",
-        "history": "📜 History",
-        "referral": "👥 Referral",
-        "deposit": "💳 Deposit",
-        "withdraw": "💸 Withdraw",
-        "support": "🆘 Support",
+        "wallet": "💰 ওয়ালেট",
+        "profile": "👤 প্রোফাইল",
+        "market": "🛒 মার্কেট",
+        "sell": "📤 সেল",
+        "my_products": "📦 আমার প্রোডাক্ট",
+        "orders": "🧾 অর্ডার",
+        "history": "📜 হিস্টরি",
+        "referral": "👥 রেফারাল",
+        "deposit": "💳 ডিপোজিট",
+        "withdraw": "💸 উইথড্র",
+        "support": "🆘 সাপোর্ট",
         "faq": "ℹ️ FAQ",
-        "update": "🔄 Update",
-        "developer": "👨‍💻 Developer",
-        "lang": "🌐 Language",
-        "admin": "🔧 Admin Panel",
+        "update": "🔄 আপডেট",
+        "developer": "👨‍💻 ডেভেলপার",
+        "lang": "🌐 ভাষা",
+        "admin": "🔧 অ্যাডমিন প্যানেল",
     },
     "en": {
         "wallet": "💰 Wallet",
@@ -547,6 +549,42 @@ MENU = {
         "developer": "👨‍💻 Developer",
         "lang": "🌐 Language",
         "admin": "🔧 Admin Panel",
+    },
+    "hi": {
+        "wallet": "💰 वॉलेट",
+        "profile": "👤 प्रोफ़ाइल",
+        "market": "🛒 मार्केट",
+        "sell": "📤 सेल",
+        "my_products": "📦 मेरे प्रोडक्ट",
+        "orders": "🧾 ऑर्डर",
+        "history": "📜 हिस्ट्री",
+        "referral": "👥 रेफरल",
+        "deposit": "💳 डिपॉजिट",
+        "withdraw": "💸 विड्रॉ",
+        "support": "🆘 सपोर्ट",
+        "faq": "ℹ️ FAQ",
+        "update": "🔄 अपडेट",
+        "developer": "👨‍💻 डेवलपर",
+        "lang": "🌐 भाषा",
+        "admin": "🔧 एडमिन पैनल",
+    },
+    "ar": {
+        "wallet": "💰 المحفظة",
+        "profile": "👤 الملف",
+        "market": "🛒 السوق",
+        "sell": "📤 بيع",
+        "my_products": "📦 منتجاتي",
+        "orders": "🧾 الطلبات",
+        "history": "📜 السجل",
+        "referral": "👥 إحالة",
+        "deposit": "💳 إيداع",
+        "withdraw": "💸 سحب",
+        "support": "🆘 الدعم",
+        "faq": "ℹ️ FAQ",
+        "update": "🔄 تحديث",
+        "developer": "👨‍💻 المطور",
+        "lang": "🌐 اللغة",
+        "admin": "🔧 لوحة الإدارة",
     },
 }
 
@@ -568,13 +606,15 @@ def user_kb(show_admin=False, lang="bn"):
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
-def admin_kb(main=False):
+def admin_kb(main=False, lang="bn"):
     rows = [
         ["👥 Users", "📄 Export Users"],
         ["📊 Stats", "🛍️ All Products"],
         ["➕ Admin Add Product", "📂 Categories"],
         ["📥 Deposits", "💸 Withdrawals"],
         ["💳 Payment Methods", "🔑 Gateway Keys"],
+        ["💵 Add Balance", "💵 Remove Balance"],
+        ["🚫 Block User", "✅ Unblock User"],
         ["📢 Force Channels", "🎁 Referral Bonus"],
         ["⚙️ Settings", "📢 Broadcast"],
         ["🤖 Bot ON/OFF", "💸 WD ON/OFF"],
@@ -2661,14 +2701,22 @@ async def cat_add_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def lang_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    lang = "bn" if q.data.endswith("bn") else "en"
+    lang = q.data.split("_")[1]
+    if lang not in ("bn", "en", "hi", "ar"):
+        lang = "bn"
     uid = q.from_user.id
     conn = get_db()
     cur = conn.cursor()
     cur.execute("UPDATE users SET lang=? WHERE user_id=?", (lang, uid))
     conn.commit()
     conn.close()
-    msg = "ভাষা বাংলা করা হয়েছে।" if lang == "bn" else "Language set to English."
+    msgs = {
+        "bn": "ভাষা বাংলা করা হয়েছে। মেনু আপডেট হয়েছে।",
+        "en": "Language set to English. Menu updated.",
+        "hi": "भाषा हिंदी सेट हो गई। मेनू अपडेट हुआ।",
+        "ar": "تم تعيين اللغة العربية. تم تحديث القائمة.",
+    }
+    msg = msgs.get(lang, msgs["en"])
     await q.edit_message_text(msg)
     await context.bot.send_message(
         uid, msg, reply_markup=user_kb(is_admin(uid), lang)
@@ -2949,39 +2997,75 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Channel: " + str(title), reply_markup=admin_kb(is_main(uid)))
         return
 
-    if text == "💰 Wallet":
+    action = match_menu_action(text)
+    if action == "wallet":
         await wallet(update, context)
-    elif text == "👤 Profile":
+        return
+    if action == "profile":
         await profile_cmd(update, context)
-    elif text == "📜 History":
+        return
+    if action == "history":
         await history_cmd(update, context)
-    elif text in ("🌐 Language", "Language"):
+        return
+    if action == "lang":
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("বাংলা", callback_data="lang_bn")],
             [InlineKeyboardButton("English", callback_data="lang_en")],
+            [InlineKeyboardButton("हिन्दी", callback_data="lang_hi")],
+            [InlineKeyboardButton("العربية", callback_data="lang_ar")],
         ])
-        await update.message.reply_text("ভাষা / Language:", reply_markup=kb)
-    elif text == "🔄 Update":
+        await update.message.reply_text("ভাষা / Language / भाषा / اللغة:", reply_markup=kb)
+        return
+    if action == "update":
         await update_cmd(update, context)
-    elif text == "👨‍💻 Developer":
+        return
+    if action == "developer":
         await developer_cmd(update, context)
-    elif text == "🛒 Market":
+        return
+    if action == "market":
         await market(update, context)
-    elif text == "👥 Referral":
-        await referral_cmd(update, context)
-    elif text == "📦 My Products":
+        return
+    if action == "my_products":
         await my_products(update, context)
-    elif text == "🧾 Orders":
+        return
+    if action == "orders":
         await orders_cmd(update, context)
-    elif text == "💬 My Chats":
-        await orders_cmd(update, context)
-    elif text == "🆘 Support":
-        await support_cmd(update, context)
-    elif text == "ℹ️ FAQ":
-        await faq_cmd(update, context)
-    elif text == "🔧 Admin Panel" and is_admin(uid):
+        return
+    if action == "referral":
+        await referral_cmd(update, context)
+        return
+    if action == "support":
+        uname = get_setting("support_username") or ""
+        if uname:
+            await update.message.reply_text("Support: @" + uname.lstrip("@"))
+        else:
+            await update.message.reply_text("Support set nai.")
+        return
+    if action == "faq":
+        await update.message.reply_text(
+            get_setting("faq_text") or "FAQ", parse_mode=ParseMode.HTML
+        )
+        return
+    if action == "admin" and is_admin(uid):
+        context.user_data["in_admin"] = True
+        await update.message.reply_text(
+            "Admin Panel",
+            reply_markup=admin_kb(is_main(uid), get_user_lang(uid)),
+        )
+        return
+    # keep sell/deposit/withdraw via conversation entry points (multi-lang regex later)
+    if action == "sell":
+        # trigger sell by reusing sell_start
+        return await sell_start(update, context)
+    if action == "deposit":
+        return await deposit_start(update, context)
+    if action == "withdraw":
+        return await withdraw_start(update, context)
+
+
+    elif text in ("🔧 Admin Panel", "🔧 অ্যাডমিন প্যানেল", "🔧 एडमिन पैनल", "🔧 لوحة الإدارة") and is_admin(uid):
         await admin_panel(update, context)
-    elif text == "🏠 User Panel":
+    elif text in ("🏠 User Panel", "🏠 ইউজার প্যানেল"):
         await update.message.reply_text("User Panel", reply_markup=user_kb(is_admin(uid)))
     elif text == "👥 Users" and is_admin(uid):
         await admin_users(update, context)
@@ -3077,7 +3161,7 @@ def main():
 
     sell_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex("^📤 Sell$"), sell_start),
+            MessageHandler(filters.Regex(r"^(📤 Sell|📤 সেল|📤 सेल|📤 بيع)$"), sell_start),
             MessageHandler(filters.Regex("^➕ Admin Add Product$"), sell_start),
         ],
         states={
@@ -3105,7 +3189,7 @@ def main():
     )
 
     dep_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^💳 Deposit$"), deposit_start)],
+        entry_points=[MessageHandler(filters.Regex(r'^(💳 Deposit|💳 ডিপোজিট|💳 डिपॉजिट|💳 إيداع)$'), deposit_start)],
         states={
             DEP_METHOD: [CallbackQueryHandler(dep_method_cb, pattern=r"^dep_")],
             DEP_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, dep_amount)],
@@ -3117,7 +3201,7 @@ def main():
     )
 
     wd_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^💸 Withdraw$"), withdraw_start)],
+        entry_points=[MessageHandler(filters.Regex(r'^(💸 Withdraw|💸 উইথড্র|💸 विड्रॉ|💸 سحب)$'), withdraw_start)],
         states={
             WD_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, wd_amount)],
             WD_METHOD: [CallbackQueryHandler(wd_method_cb, pattern=r"^wdm_")],
@@ -3200,7 +3284,7 @@ def main():
     app.add_handler(CallbackQueryHandler(prod_cb, pattern=r"^prod_\d+$"))
     app.add_handler(CallbackQueryHandler(buy_cb, pattern=r"^buy_\d+$"))
     app.add_handler(CallbackQueryHandler(gw_verify_cb, pattern=r"^gwver_\d+$"))
-    app.add_handler(CallbackQueryHandler(lang_cb, pattern=r"^lang_(bn|en)$"))
+    app.add_handler(CallbackQueryHandler(lang_cb, pattern=r"^lang_(bn|en|hi|ar)$"))
     app.add_handler(CallbackQueryHandler(delivery_cb, pattern=r"^dlv_\d+$"))
     app.add_handler(CallbackQueryHandler(myprod_cb, pattern=r"^myprod_\d+$"))
     app.add_handler(CallbackQueryHandler(ptog_cb, pattern=r"^ptog_\d+$"))
