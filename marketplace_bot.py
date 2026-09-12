@@ -1784,7 +1784,7 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Min Withdraw", callback_data="set_min_withdraw")],
         [InlineKeyboardButton("Support Username", callback_data="set_support_username")],
         [InlineKeyboardButton("FAQ Text", callback_data="set_faq_text")],
-        [InlineKeyboardButton("Toggle Maintenance", callback_data="tog_maint")],
+        [InlineKeyboardButton("🔧 Maintenance Mode ON/OFF", callback_data="tog_maint")],
     ]
     await update.message.reply_text(
         text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons)
@@ -1799,7 +1799,10 @@ async def set_field_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "tog_maint":
         cur = get_setting("maintenance", "0")
         set_setting("maintenance", "0" if cur == "1" else "1")
-        await q.edit_message_text(f"Maintenance = {get_setting('maintenance')}")
+        on = get_setting("maintenance") == "1"
+        await q.edit_message_text(
+            "🔧 Maintenance Mode: " + ("ON — ইউজার বট ব্যবহার করতে পারবে না" if on else "OFF — বট স্বাভাবিক")
+        )
         return
     key = q.data.replace("set_", "", 1)
     context.user_data["set_key"] = key
@@ -1827,23 +1830,27 @@ async def gateway_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     body = (
         "🔑 <b>Merchant Payment Gateways</b>\n\n"
-        "<b>1) NagorikPay</b>\n"
+        "<b>1) NagorikPay</b> (nagorikpay.com)\n"
         f"API: <code>{get_setting('gateway_nagorik_api') or '(empty)'}</code>\n"
-        f"Secret: <code>{(get_setting('gateway_nagorik_secret') or '(empty)')[:12]}</code>\n\n"
-        "<b>2) RupantorPay</b> (getway.daweblab.com)\n"
+        f"Secret: <code>{(get_setting('gateway_nagorik_secret') or 'empty')[:12]}</code>\n\n"
+        "<b>2) RupantorPay</b> (rupantorpay.com)\n"
         f"API: <code>{get_setting('gateway_rupantor_api') or '(empty)'}</code>\n"
-        f"Secret: <code>{(get_setting('gateway_rupantor_secret') or '(empty)')[:12]}</code>\n\n"
-        f"Gateway master: {get_setting('gateway_enabled')}\n\n"
-        "📌 Affiliate লিংক দিয়ে অটো পেমেন্ট হয় না।\n"
-        "মার্চেন্ট প্যানেল থেকে API Key/Secret নিয়ে এখানে সেট করুন।\n"
-        "ম্যানুয়াল bKash/Nagad → Payment Methods মেনু।"
+        f"Secret: <code>{(get_setting('gateway_rupantor_secret') or 'empty')[:12]}</code>\n\n"
+        "<b>3) Daweblab Gateway</b> (getway.daweblab.com)\n"
+        f"API: <code>{get_setting('gateway_daweblab_api') or '(empty)'}</code>\n"
+        f"Secret: <code>{(get_setting('gateway_daweblab_secret') or 'empty')[:12]}</code>\n\n"
+        f"Master: {get_setting('gateway_enabled')}\n\n"
+        "📌 মার্চেন্ট প্যানেল থেকে API Key নিয়ে সেট করুন।\n"
+        "ম্যানুয়াল নম্বর (bKash/Nagad) → 💳 Payment Methods"
     )
     buttons = [
         [InlineKeyboardButton("Nagorik API", callback_data="set_gateway_nagorik_api")],
         [InlineKeyboardButton("Nagorik Secret", callback_data="set_gateway_nagorik_secret")],
         [InlineKeyboardButton("Rupantor API", callback_data="set_gateway_rupantor_api")],
         [InlineKeyboardButton("Rupantor Secret", callback_data="set_gateway_rupantor_secret")],
-        [InlineKeyboardButton("Toggle Gateway ON/OFF", callback_data="tog_gw")],
+        [InlineKeyboardButton("Daweblab API", callback_data="set_gateway_daweblab_api")],
+        [InlineKeyboardButton("Daweblab Secret", callback_data="set_gateway_daweblab_secret")],
+        [InlineKeyboardButton("Gateway Master ON/OFF", callback_data="tog_gw")],
     ]
     await update.message.reply_text(
         body, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons)
@@ -1943,7 +1950,28 @@ async def pmtog_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     conn.commit()
     conn.close()
-    await q.edit_message_text("✅ টগল হয়েছে। আবার Payment Methods খুলুন।")
+    await q.answer("টগল OK", show_alert=False)
+    await q.edit_message_text("✅ টগল হয়েছে। আবার 💳 Payment Methods খুলুন।")
+
+
+async def pmdel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(q.from_user.id):
+        return
+    mid = int(q.data.split("_")[1])
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM payment_methods WHERE id=?", (mid,))
+    row = cur.fetchone()
+    cur.execute("DELETE FROM payment_methods WHERE id=?", (mid,))
+    conn.commit()
+    conn.close()
+    name = row["name"] if row else mid
+    await q.edit_message_text(
+        f"🗑 ডিলিট হয়েছে: <b>{name}</b>\nআবার Payment Methods খুলুন।",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def pm_add_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1988,13 +2016,64 @@ async def categories_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM categories")
+    cur.execute("SELECT * FROM categories ORDER BY id")
     rows = cur.fetchall()
     conn.close()
-    text = "📂 Categories\n\n"
+    body = "📂 <b>Categories</b>\nইউজাররা এই নামের ভিতরে প্রোডাক্ট সেল/কিনতে পারবে।\n\n"
+    buttons = []
     for c in rows:
-        text += f"#{c['id']} {c['emoji']} {c['name']} active={c['is_active']}\n"
-    await update.message.reply_text(text)
+        body += f"#{c['id']} {c['emoji']} <b>{c['name']}</b> [{'ON' if c['is_active'] else 'OFF'}]\n"
+        buttons.append([
+            InlineKeyboardButton(
+                f"{'⏸' if c['is_active'] else '▶️'} {c['name']}",
+                callback_data=f"cattog_{c['id']}",
+            ),
+            InlineKeyboardButton("🗑", callback_data=f"catdel_{c['id']}"),
+        ])
+    buttons.append([InlineKeyboardButton("➕ Add Category", callback_data="cat_add")])
+    await update.message.reply_text(
+        body, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+async def cattog_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(q.from_user.id):
+        return
+    cid = int(q.data.split("_")[1])
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE categories SET is_active = 1 - is_active WHERE id=?", (cid,))
+    conn.commit()
+    conn.close()
+    await q.edit_message_text("✅ ক্যাটাগরি টগল। আবার 📂 Categories খুলুন।")
+
+
+async def catdel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(q.from_user.id):
+        return
+    cid = int(q.data.split("_")[1])
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM categories WHERE id=?", (cid,))
+    conn.commit()
+    conn.close()
+    await q.edit_message_text("🗑 ক্যাটাগরি ডিলিট। আবার Categories খুলুন।")
+
+
+async def cat_add_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(q.from_user.id):
+        return
+    context.user_data["await_cat_name"] = True
+    await q.edit_message_text(
+        "নতুন ক্যাটাগরি নাম লিখুন:\n"
+        "উদাহরণ: Bot, Source Code, Website, Template, Course, Script"
+    )
 
 
 # ================== ROUTER ==================
@@ -2008,6 +2087,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if get_setting("maintenance") == "1" and not is_admin(uid):
         await update.message.reply_text("🔧 Maintenance")
+        return
+
+    if context.user_data.get("await_cat_name") and is_admin(uid):
+        context.user_data.pop("await_cat_name", None)
+        name = text.strip()[:40]
+        emoji = "📦"
+        conn = get_db()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO categories (name, emoji) VALUES (?, ?)", (name, emoji)
+            )
+            conn.commit()
+            await update.message.reply_text(
+                "✅ Category added: " + name,
+                reply_markup=admin_kb(is_main(uid)),
+            )
+        except Exception as e:
+            await update.message.reply_text("Error: %s (নাম আগে থাকতে পারে)" % e)
+        conn.close()
         return
 
     # generic setting value (referral bonus etc.)
@@ -2146,7 +2245,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "💸 WD ON/OFF" and is_admin(uid):
         await toggle_wd(update, context)
     elif text == "➕ Admin Add Product" and is_admin(uid):
-        await update.message.reply_text("Admin product: use 📤 Sell flow as admin (same), or list via Sell.")
+        await update.message.reply_text(
+            "➕ Admin Product\nনিচের Sell ফ্লো শুরু হচ্ছে — ক্যাটাগরি বেছে নিন।"
+        )
+        return await sell_start(update, context)
 
 
 
@@ -2158,7 +2260,10 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     sell_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📤 Sell$"), sell_start)],
+        entry_points=[
+            MessageHandler(filters.Regex("^📤 Sell$"), sell_start),
+            MessageHandler(filters.Regex("^➕ Admin Add Product$"), sell_start),
+        ],
         states={
             SELL_CAT: [CallbackQueryHandler(sell_cat_cb, pattern=r"^scat_")],
             SELL_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sell_title)],
@@ -2230,7 +2335,7 @@ def main():
         entry_points=[
             CallbackQueryHandler(
                 set_field_cb,
-                pattern=r"^(set_min_deposit|set_min_withdraw|set_support_username|set_faq_text|set_gateway_nagorik_api|set_gateway_nagorik_secret|set_admin_commission_percent|set_gateway_rupantor_api|set_gateway_rupantor_secret)$",
+                pattern=r"^(set_min_deposit|set_min_withdraw|set_support_username|set_faq_text|set_gateway_nagorik_api|set_gateway_nagorik_secret|set_admin_commission_percent|set_gateway_rupantor_api|set_gateway_rupantor_secret|set_gateway_daweblab_api|set_gateway_daweblab_secret)$",
             )
         ],
         states={
@@ -2280,6 +2385,10 @@ def main():
     app.add_handler(CallbackQueryHandler(wdok_cb, pattern=r"^wdok_\d+$"))
     app.add_handler(CallbackQueryHandler(wdrj_cb, pattern=r"^wdrj_\d+$"))
     app.add_handler(CallbackQueryHandler(pmtog_cb, pattern=r"^pmtog_\d+$"))
+    app.add_handler(CallbackQueryHandler(pmdel_cb, pattern=r"^pmdel_\d+$"))
+    app.add_handler(CallbackQueryHandler(cattog_cb, pattern=r"^cattog_\d+$"))
+    app.add_handler(CallbackQueryHandler(catdel_cb, pattern=r"^catdel_\d+$"))
+    app.add_handler(CallbackQueryHandler(cat_add_cb, pattern=r"^cat_add$"))
     app.add_handler(CallbackQueryHandler(tog_gw_cb, pattern=r"^tog_gw$"))
     app.add_handler(CallbackQueryHandler(set_field_cb, pattern=r"^tog_maint$"))
 
