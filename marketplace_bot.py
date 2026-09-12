@@ -589,6 +589,69 @@ MENU = {
 }
 
 
+
+def match_menu_action(label: str) -> str:
+    t = (label or "").strip()
+    for lang_map in MENU.values():
+        for key, val in lang_map.items():
+            if t == val:
+                return key
+    # emoji-prefix fallback (if text slightly differs)
+    for lang_map in MENU.values():
+        for key, val in lang_map.items():
+            if t.endswith(val[2:].strip()) or val.endswith(t[2:].strip() if len(t) > 2 else t):
+                if t[:2] == val[:2] or (len(t) > 0 and len(val) > 0 and t[0] == val[0]):
+                    # stronger: first emoji/word match
+                    pass
+    legacy = {
+        "💰 Wallet": "wallet",
+        "👤 Profile": "profile",
+        "🛒 Market": "market",
+        "📤 Sell": "sell",
+        "📦 My Products": "my_products",
+        "🧾 Orders": "orders",
+        "📜 History": "history",
+        "👥 Referral": "referral",
+        "💳 Deposit": "deposit",
+        "💸 Withdraw": "withdraw",
+        "🆘 Support": "support",
+        "ℹ️ FAQ": "faq",
+        "🔄 Update": "update",
+        "👨‍💻 Developer": "developer",
+        "🌐 Language": "lang",
+        "🌐 ভাষা": "lang",
+        "🔧 Admin Panel": "admin",
+        "🔧 অ্যাডমিন প্যানেল": "admin",
+        "🏠 User Panel": "user_panel",
+    }
+    if t in legacy:
+        return legacy[t]
+    # contains match by key words
+    low = t.lower()
+    checks = [
+        ("wallet", "wallet"), ("ওয়ালেট", "wallet"), ("ওয়ালেট", "wallet"),
+        ("profile", "profile"), ("প্রোফাইল", "profile"),
+        ("market", "market"), ("মার্কেট", "market"),
+        ("sell", "sell"), ("সেল", "sell"),
+        ("my product", "my_products"), ("আমার প্রোডাক্ট", "my_products"),
+        ("order", "orders"), ("অর্ডার", "orders"),
+        ("history", "history"), ("হিস্টরি", "history"),
+        ("referral", "referral"), ("রেফার", "referral"),
+        ("deposit", "deposit"), ("ডিপোজিট", "deposit"),
+        ("withdraw", "withdraw"), ("উইথড্র", "withdraw"),
+        ("support", "support"), ("সাপোর্ট", "support"),
+        ("faq", "faq"),
+        ("update", "update"), ("আপডেট", "update"),
+        ("developer", "developer"), ("ডেভেলপার", "developer"),
+        ("language", "lang"), ("ভাষা", "lang"),
+        ("admin", "admin"), ("অ্যাডমিন", "admin"),
+    ]
+    for needle, key in checks:
+        if needle in low or needle in t:
+            return key
+    return ""
+
+
 def user_kb(show_admin=False, lang="bn"):
     m = MENU.get(lang) or MENU["bn"]
     rows = [
@@ -2868,6 +2931,17 @@ async def block_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await _handle_text_inner(update, context)
+    except Exception as e:
+        logging.exception("handle_text error")
+        try:
+            await update.message.reply_text("Error: %s" % e)
+        except Exception:
+            pass
+
+
+async def _handle_text_inner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     uid = update.effective_user.id
     ensure_user(uid, update.effective_user.username, update.effective_user.full_name)
@@ -3045,6 +3119,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             get_setting("faq_text") or "FAQ", parse_mode=ParseMode.HTML
         )
+        return
+    if action == "user_panel":
+        context.user_data["in_admin"] = False
+        await update.message.reply_text("User Panel", reply_markup=user_kb(is_admin(uid), get_user_lang(uid)))
         return
     if action == "admin" and is_admin(uid):
         context.user_data["in_admin"] = True
