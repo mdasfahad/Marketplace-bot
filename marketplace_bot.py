@@ -12,6 +12,9 @@ Main Admin: 8289191009
 """
 
 import logging
+import json
+import urllib.request
+import urllib.error
 import sqlite3
 import string
 import random
@@ -77,7 +80,8 @@ logger = logging.getLogger(__name__)
     BAL_USER,
     BAL_AMT,
     BLOCK_USER,
-) = range(26)
+    DEP_GW_AMOUNT,
+) = range(27)
 
 
 # ================== DB ==================
@@ -223,6 +227,15 @@ def init_db():
         "gateway_rupantor_api": "",
         "gateway_rupantor_secret": "",
         "gateway_enabled": "0",
+        "gateway_name": "Auto Gateway",
+        "gateway_api_key": "",
+        "gateway_secret": "",
+        "gateway_create_url": "https://client-pg.daweblab.com/api/payment/create",
+        "gateway_verify_url": "https://client-pg.daweblab.com/api/payment/verify",
+        "gateway_header_name": "api-key",
+        "gateway_min": "50",
+        "gateway_daweblab_api": "",
+        "gateway_daweblab_secret": "",
         "maintenance": "0",
     }
     for k, v in defaults.items():
@@ -283,6 +296,93 @@ def set_setting(key, value):
     )
     conn.commit()
     conn.close()
+
+
+
+def _http_json(method: str, url: str, headers: dict, payload: Optional[dict] = None, timeout: int = 30):
+    data = None
+    hdrs = dict(headers or {})
+    hdrs.setdefault("Content-Type", "application/json")
+    hdrs.setdefault("Accept", "application/json")
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=hdrs, method=method.upper())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            try:
+                return resp.status, json.loads(body) if body else {}
+            except Exception:
+                return resp.status, {"raw": body}
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        try:
+            return e.code, json.loads(body) if body else {"error": str(e)}
+        except Exception:
+            return e.code, {"error": str(e), "raw": body}
+    except Exception as e:
+        return 0, {"error": str(e)}
+
+
+def gateway_headers():
+    key = get_setting("gateway_api_key") or get_setting("gateway_daweblab_api") or ""
+    secret = get_setting("gateway_secret") or get_setting("gateway_daweblab_secret") or ""
+    hname = (get_setting("gateway_header_name") or "api-key").strip()
+    h = {}
+    if key:
+        if hname.lower() in ("authorization", "bearer"):
+            h["Authorization"] = f"Bearer {key}"
+        else:
+            h[hname] = key
+    if secret:
+        h["secret-key"] = secret
+        h["X-Secret-Key"] = secret
+    return h
+
+
+def gateway_extract_url(obj):
+    if not isinstance(obj, dict):
+        return None
+    for k in ("payment_url", "checkout_url", "url", "redirect_url", "link", "pay_url"):
+        if obj.get(k):
+            return str(obj[k])
+    data = obj.get("data")
+    if isinstance(data, dict):
+        for k in ("payment_url", "checkout_url", "url", "redirect_url", "link", "pay_url"):
+            if data.get(k):
+                return str(data[k])
+    return None
+
+
+def gateway_extract_trx(obj):
+    if not isinstance(obj, dict):
+        return None
+    for k in ("transaction_id", "trx_id", "trxId", "payment_id", "invoice_id", "id", "order_id"):
+        if obj.get(k):
+            return str(obj[k])
+    data = obj.get("data")
+    if isinstance(data, dict):
+        for k in ("transaction_id", "trx_id", "trxId", "payment_id", "invoice_id", "id", "order_id"):
+            if data.get(k):
+                return str(data[k])
+    return None
+
+
+def gateway_is_paid(obj):
+    if not isinstance(obj, dict):
+        return False
+    status = str(obj.get("status") or obj.get("payment_status") or "").lower()
+    if status in ("paid", "success", "completed", "successful", "complete", "ok"):
+        return True
+    data = obj.get("data")
+    if isinstance(data, dict):
+        status = str(data.get("status") or data.get("payment_status") or "").lower()
+        if status in ("paid", "success", "completed", "successful", "complete", "ok"):
+            return True
+    if obj.get("success") is True or obj.get("paid") is True:
+        return True
+    return False
+
 
 
 def is_admin(uid: int) -> bool:
@@ -1465,17 +1565,25 @@ async def deposit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not methods:
         await update.message.reply_text("পেমেন্ট মেথড সেট নেই। অ্যাডমিনকে বলুন।")
         return ConversationHandler.END
-    buttons = [
-        [InlineKeyboardButton(m["name"], callback_data=f"dep_{m['id']}")]
-        for m in methods
-    ]
-    # gateway note
+    try:
+        default_min = float(get_setting("min_deposit", "50") or 50)
+    except Exception:
+        default_min = 50.0
+    buttons = []
+    for m in methods:
+        try:
+            mm = float(m["min_amount"] or 0)
+        except Exception:
+            mm = 0
+        effective = mm if mm > 0 else default_min
+        label = f"{m['name']} (min {effective:.0f}৳)"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"dep_{m['id']}")])
     if get_setting("gateway_enabled") == "1":
         buttons.append(
-            [InlineKeyboardButton("⚡ Auto Gateway (NagorikPay)", callback_data="dep_gw")]
+            [InlineKeyboardButton("⚡ Auto Gateway", callback_data="dep_gw")]
         )
     await update.message.reply_text(
-        f"💳 <b>Deposit</b>\nMin: {get_setting('min_deposit')} BDT\nমেথড বেছে নিন:",
+        "💳 <b>Deposit</b>\nপ্রতি মেথডের নিজস্ব minimum আলাদা।\nমেথড বেছে নিন:",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(buttons),
     )
@@ -1486,21 +1594,23 @@ async def dep_method_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     if q.data == "dep_gw":
-        api = get_setting("gateway_nagorik_api")
-        if not api:
-            await q.edit_message_text(
-                "⚠️ Auto gateway API এখনো সেট হয়নি।\n"
-                "Admin → Gateway Keys এ API Key দিন।\n"
-                "এখন ম্যানুয়াল মেথড ব্যবহার করুন।"
-            )
+        if get_setting("gateway_enabled") != "1":
+            await q.edit_message_text("Auto Gateway OFF. Admin ON করুক।")
             return ConversationHandler.END
+        api = get_setting("gateway_api_key") or get_setting("gateway_daweblab_api") or ""
+        if not api:
+            await q.edit_message_text("API Key নেই। Admin → Gateway Keys এ সেট করুন।")
+            return ConversationHandler.END
+        try:
+            gmin = float(get_setting("gateway_min") or get_setting("min_deposit") or 50)
+        except Exception:
+            gmin = 50.0
+        context.user_data["dep_gw"] = True
+        context.user_data["dep_min"] = gmin
         await q.edit_message_text(
-            "⚡ Auto gateway কনফিগারড।\n"
-            "পূর্ণ অটো পেমেন্ট চালু করতে NagorikPay মার্চেন্ট API ডক অনুযায়ী "
-            "ইন্টিগ্রেশন সম্পন্ন করতে হবে।\n"
-            "এখন ম্যানুয়াল ডিপোজিট ব্যবহার করুন।"
+            "Auto Gateway\nMin: %.0f BDT\n\nপরিমাণ লিখুন:" % gmin
         )
-        return ConversationHandler.END
+        return DEP_GW_AMOUNT
     mid = int(q.data.split("_")[1])
     conn = get_db()
     cur = conn.cursor()
@@ -1524,7 +1634,7 @@ async def dep_method_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["dep_min"] = mmin
     await q.edit_message_text(
         f"মেথড: <b>{m['name']}</b>\n\n{m['info']}\n\n"
-        f"পরিমাণ লিখুন (min {get_setting('min_deposit')}):",
+        f"পরিমাণ লিখুন (এই মেথডের min {mmin:.0f} BDT):",
         parse_mode=ParseMode.HTML,
     )
     return DEP_AMOUNT
@@ -1532,12 +1642,15 @@ async def dep_method_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def dep_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        amt = float(update.message.text.strip())
         mn = float(context.user_data.get("dep_min") or get_setting("min_deposit", "50") or 50)
+    except Exception:
+        mn = 50.0
+    try:
+        amt = float(update.message.text.strip())
         if amt < mn:
             raise ValueError
     except ValueError:
-        await update.message.reply_text(f"সঠিক পরিমাণ (min {get_setting('min_deposit')})")
+        await update.message.reply_text(f"সঠিক পরিমাণ (এই মেথডের min {mn:.0f} BDT)")
         return DEP_AMOUNT
     context.user_data["dep_amount"] = amt
     await update.message.reply_text(
@@ -1653,6 +1766,162 @@ async def deprj_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================== WITHDRAW ==================
+
+
+async def dep_gw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        mn = float(context.user_data.get("dep_min") or get_setting("gateway_min") or 50)
+    except Exception:
+        mn = 50.0
+    try:
+        amt = float(update.message.text.strip())
+        if amt < mn:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("সঠিক পরিমাণ (min %.0f)" % mn)
+        return DEP_GW_AMOUNT
+
+    uid = update.effective_user.id
+    u = update.effective_user
+    create_url = get_setting("gateway_create_url") or "https://client-pg.daweblab.com/api/payment/create"
+    order_id = "tg_%s_%s" % (uid, int(datetime.now().timestamp()))
+    payload = {
+        "amount": amt,
+        "cus_name": (u.full_name or u.username or str(uid))[:80],
+        "cus_email": "%s@telegram.user" % uid,
+        "metadata": {"user_id": uid, "bot": "marketplace"},
+        "redirect_url": "https://t.me/",
+        "cancel_url": "https://t.me/",
+        "order_id": order_id,
+        "trx_id": order_id,
+        "full_name": (u.full_name or str(uid))[:80],
+        "customer_name": (u.full_name or str(uid))[:80],
+    }
+    status, resp = _http_json("POST", create_url, gateway_headers(), payload)
+    pay_url = gateway_extract_url(resp) if isinstance(resp, dict) else None
+    trx = gateway_extract_trx(resp) if isinstance(resp, dict) else None
+    if not trx:
+        trx = order_id
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO deposits (user_id, amount, method, proof_file_id, status, created_at) VALUES (?,?,?,?,?,?)",
+        (uid, amt, get_setting("gateway_name") or "AutoGateway", trx, "pending_gw", datetime.now().isoformat()),
+    )
+    dep_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    kb = InlineKeyboardMarkup(
+        (
+            [[InlineKeyboardButton("Pay Now", url=pay_url), InlineKeyboardButton("I Paid Verify", callback_data="gwver_%s" % dep_id)]]
+            if pay_url
+            else [[InlineKeyboardButton("Verify", callback_data="gwver_%s" % dep_id)]]
+        )
+    )
+    if pay_url:
+        msg = (
+            "পেমেন্ট লিংক তৈরি হয়েছে।\n"
+            "Amount: <b>%.2f</b> BDT\n"
+            "Ref: <code>%s</code>\n\n"
+            "1) লিংকে গিয়ে পে করুন\n"
+            "2) শেষে Verify চাপুন"
+        ) % (amt, trx)
+    else:
+        msg = (
+            "পেমেন্ট লিংক আসেনি (HTTP %s).\n"
+            "Admin API URL/Key চেক করুন।\n"
+            "Response: <code>%s</code>\n"
+            "Ref: <code>%s</code> Amount: %.2f"
+        ) % (status, str(resp)[:300], trx, amt)
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb)
+    try:
+        await context.bot.send_message(
+            MAIN_ADMIN_ID,
+            "Auto GW deposit request\nUser: %s\nAmount: %s\nRef: %s" % (uid, amt, trx),
+        )
+    except Exception:
+        pass
+    return ConversationHandler.END
+
+
+async def gw_verify_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("যাচাই হচ্ছে...")
+    dep_id = int(q.data.split("_")[1])
+    uid = q.from_user.id
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM deposits WHERE id=?", (dep_id,))
+    d = cur.fetchone()
+    if not d or d["user_id"] != uid:
+        conn.close()
+        await q.edit_message_text("ডিপোজিট নেই।")
+        return
+    if d["status"] == "approved":
+        conn.close()
+        await q.edit_message_text("আগেই অ্যাপ্রুভড।")
+        return
+
+    verify_url = get_setting("gateway_verify_url") or "https://client-pg.daweblab.com/api/payment/verify"
+    trx = d["proof_file_id"]
+    payload = {
+        "transaction_id": trx,
+        "trx_id": trx,
+        "payment_id": trx,
+        "order_id": trx,
+        "amount": d["amount"],
+    }
+    status, resp = _http_json("POST", verify_url, gateway_headers(), payload)
+    paid = gateway_is_paid(resp) if isinstance(resp, dict) else False
+    if not paid and isinstance(resp, dict):
+        low = str(resp).lower()
+        if ("success" in low or "paid" in low) and "fail" not in low and "pending" not in low:
+            paid = True
+
+    if not paid:
+        conn.close()
+        await q.edit_message_text(
+            "এখনো paid নয় (HTTP %s).\nপেমেন্ট শেষে আবার Verify চাপুন।\n<code>%s</code>"
+            % (status, str(resp)[:250]),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Verify again", callback_data="gwver_%s" % dep_id)]]
+            ),
+        )
+        return
+
+    cur.execute(
+        "UPDATE deposits SET status='approved' WHERE id=? AND status!='approved'",
+        (dep_id,),
+    )
+    if cur.rowcount:
+        cur.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id=?",
+            (d["amount"], uid),
+        )
+        try:
+            cur.execute(
+                "INSERT INTO history (user_id, kind, amount, note, created_at) VALUES (?,?,?,?,?)",
+                (uid, "deposit", d["amount"], "gw %s" % trx, datetime.now().isoformat()),
+            )
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
+    await q.edit_message_text(
+        "পেমেন্ট ভেরিফাইড! +%.2f BDT যোগ হয়েছে।" % float(d["amount"])
+    )
+    try:
+        await context.bot.send_message(
+            MAIN_ADMIN_ID, "Auto GW approved User %s +%s" % (uid, d["amount"])
+        )
+    except Exception:
+        pass
+
+
+
 async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if get_setting("withdraw_enabled", "1") != "1":
         await update.message.reply_text("💸 উইথড্র বন্ধ।")
@@ -2027,33 +2296,35 @@ async def set_value_recv(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def gateway_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    body = (
-        "🔑 <b>Merchant Payment Gateways</b>\n\n"
-        "<b>1) NagorikPay</b> (nagorikpay.com)\n"
-        f"API: <code>{get_setting('gateway_nagorik_api') or '(empty)'}</code>\n"
-        f"Secret: <code>{(get_setting('gateway_nagorik_secret') or 'empty')[:12]}</code>\n\n"
-        "<b>2) RupantorPay</b> (rupantorpay.com)\n"
-        f"API: <code>{get_setting('gateway_rupantor_api') or '(empty)'}</code>\n"
-        f"Secret: <code>{(get_setting('gateway_rupantor_secret') or 'empty')[:12]}</code>\n\n"
-        "<b>3) Daweblab Gateway</b> (getway.daweblab.com)\n"
-        f"API: <code>{get_setting('gateway_daweblab_api') or '(empty)'}</code>\n"
-        f"Secret: <code>{(get_setting('gateway_daweblab_secret') or 'empty')[:12]}</code>\n\n"
-        f"Master: {get_setting('gateway_enabled')}\n\n"
-        "📌 মার্চেন্ট প্যানেল থেকে API Key নিয়ে সেট করুন।\n"
-        "ম্যানুয়াল নম্বর (bKash/Nagad) → 💳 Payment Methods"
-    )
-    buttons = [
-        [InlineKeyboardButton("Nagorik API", callback_data="set_gateway_nagorik_api")],
-        [InlineKeyboardButton("Nagorik Secret", callback_data="set_gateway_nagorik_secret")],
-        [InlineKeyboardButton("Rupantor API", callback_data="set_gateway_rupantor_api")],
-        [InlineKeyboardButton("Rupantor Secret", callback_data="set_gateway_rupantor_secret")],
-        [InlineKeyboardButton("Daweblab API", callback_data="set_gateway_daweblab_api")],
-        [InlineKeyboardButton("Daweblab Secret", callback_data="set_gateway_daweblab_secret")],
-        [InlineKeyboardButton("Gateway Master ON/OFF", callback_data="tog_gw")],
+    api = get_setting("gateway_api_key") or get_setting("gateway_daweblab_api") or ""
+    sec = get_setting("gateway_secret") or get_setting("gateway_daweblab_secret") or ""
+    lines = [
+        "Auto Payment Gateway Setup",
+        "Sob kichu Admin Panel theke set kora jabe.",
+        "",
+        "Name: %s" % (get_setting("gateway_name") or "Auto Gateway"),
+        "Enabled: %s" % get_setting("gateway_enabled"),
+        "Min: %s BDT" % (get_setting("gateway_min") or get_setting("min_deposit")),
+        "API Key: %s" % ((api or "(empty)")[:24]),
+        "Secret: %s" % ((sec or "(empty)")[:12]),
+        "Header: %s" % (get_setting("gateway_header_name") or "api-key"),
+        "Create: %s" % (get_setting("gateway_create_url") or "-"),
+        "Verify: %s" % (get_setting("gateway_verify_url") or "-"),
+        "",
+        "1-7 set then ON/OFF.",
     ]
-    await update.message.reply_text(
-        body, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    body = chr(10).join(lines)
+    buttons = [
+        [InlineKeyboardButton("1) API Key", callback_data="set_gateway_api_key")],
+        [InlineKeyboardButton("2) Secret Key", callback_data="set_gateway_secret")],
+        [InlineKeyboardButton("3) Header Name", callback_data="set_gateway_header_name")],
+        [InlineKeyboardButton("4) Create URL", callback_data="set_gateway_create_url")],
+        [InlineKeyboardButton("5) Verify URL", callback_data="set_gateway_verify_url")],
+        [InlineKeyboardButton("6) Gateway Name", callback_data="set_gateway_name")],
+        [InlineKeyboardButton("7) Gateway Min", callback_data="set_gateway_min")],
+        [InlineKeyboardButton("ON/OFF Gateway", callback_data="tog_gw")],
+    ]
+    await update.message.reply_text(body, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def tog_gw_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2717,6 +2988,7 @@ def main():
             DEP_METHOD: [CallbackQueryHandler(dep_method_cb, pattern=r"^dep_")],
             DEP_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, dep_amount)],
             DEP_PROOF: [MessageHandler(filters.PHOTO, dep_proof)],
+            DEP_GW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, dep_gw_amount)],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
         allow_reentry=True,
@@ -2761,7 +3033,7 @@ def main():
         entry_points=[
             CallbackQueryHandler(
                 set_field_cb,
-                pattern=r"^(set_min_deposit|set_min_withdraw|set_support_username|set_faq_text|set_gateway_nagorik_api|set_gateway_nagorik_secret|set_admin_commission_percent|set_gateway_rupantor_api|set_gateway_rupantor_secret|set_gateway_daweblab_api|set_gateway_daweblab_secret|set_referral_shop_percent|set_developer_username|set_developer_prefill|set_update_text)$",
+                pattern=r"^(set_min_deposit|set_min_withdraw|set_support_username|set_faq_text|set_gateway_nagorik_api|set_gateway_nagorik_secret|set_admin_commission_percent|set_gateway_rupantor_api|set_gateway_rupantor_secret|set_gateway_daweblab_api|set_gateway_daweblab_secret|set_referral_shop_percent|set_developer_username|set_developer_prefill|set_update_text|set_gateway_api_key|set_gateway_secret|set_gateway_header_name|set_gateway_create_url|set_gateway_verify_url|set_gateway_name|set_gateway_min)$",
             )
         ],
         states={
@@ -2805,6 +3077,7 @@ def main():
     app.add_handler(CallbackQueryHandler(back_market_cb, pattern=r"^back_market$"))
     app.add_handler(CallbackQueryHandler(prod_cb, pattern=r"^prod_\d+$"))
     app.add_handler(CallbackQueryHandler(buy_cb, pattern=r"^buy_\d+$"))
+    app.add_handler(CallbackQueryHandler(gw_verify_cb, pattern=r"^gwver_\d+$"))
     app.add_handler(CallbackQueryHandler(delivery_cb, pattern=r"^dlv_\d+$"))
     app.add_handler(CallbackQueryHandler(myprod_cb, pattern=r"^myprod_\d+$"))
     app.add_handler(CallbackQueryHandler(ptog_cb, pattern=r"^ptog_\d+$"))
