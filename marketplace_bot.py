@@ -195,6 +195,11 @@ def init_db():
 
     defaults = {
         "min_deposit": "50",
+        "default_lang": "bn",
+
+        "min_deposit_binance": "140",
+        "min_deposit_mobile": "50",
+
         "min_withdraw": "100",
         "bot_enabled": "1",
         "withdraw_enabled": "1",
@@ -233,7 +238,7 @@ def init_db():
         "gateway_create_url": "https://client-pg.daweblab.com/api/payment/create",
         "gateway_verify_url": "https://client-pg.daweblab.com/api/payment/verify",
         "gateway_header_name": "api-key",
-        "gateway_min": "50",
+        "gateway_min": "10",
         "gateway_daweblab_api": "",
         "gateway_daweblab_secret": "",
         "maintenance": "0",
@@ -272,6 +277,10 @@ def init_db():
         pass
     try:
         cur.execute("ALTER TABLE payment_methods ADD COLUMN min_amount REAL DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN lang TEXT DEFAULT 'bn'")
     except Exception:
         pass
 
@@ -384,6 +393,46 @@ def gateway_is_paid(obj):
     return False
 
 
+def get_user_lang(uid: int) -> str:
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT lang FROM users WHERE user_id=?", (uid,))
+        r = cur.fetchone()
+        conn.close()
+        if r and r["lang"]:
+            return r["lang"]
+    except Exception:
+        pass
+    return get_setting("default_lang", "bn") or "bn"
+
+
+def resolve_method_min(method_name: str, method_row_min=None) -> float:
+    """Binance/USDT use binance min; bKash/Nagad/Rocket/Upay use mobile min; else row or global."""
+    name = (method_name or "").lower()
+    try:
+        row_min = float(method_row_min or 0)
+    except Exception:
+        row_min = 0.0
+    if row_min > 0:
+        return row_min
+    if any(x in name for x in ("binance", "usdt", "bep20", "crypto")):
+        try:
+            return float(get_setting("min_deposit_binance", "140") or 140)
+        except Exception:
+            return 140.0
+    if any(x in name for x in ("bkash", "bkas", "nagad", "rocket", "upay", "nagd")):
+        try:
+            return float(get_setting("min_deposit_mobile", "50") or 50)
+        except Exception:
+            return 50.0
+    try:
+        return float(get_setting("min_deposit", "50") or 50)
+    except Exception:
+        return 50.0
+
+
+
 
 def is_admin(uid: int) -> bool:
     if uid == MAIN_ADMIN_ID:
@@ -462,18 +511,60 @@ def add_balance(uid: int, amount: float, note: str = ""):
     conn.close()
 
 
-def user_kb(show_admin=False):
+MENU = {
+    "bn": {
+        "wallet": "💰 Wallet",
+        "profile": "👤 Profile",
+        "market": "🛒 Market",
+        "sell": "📤 Sell",
+        "my_products": "📦 My Products",
+        "orders": "🧾 Orders",
+        "history": "📜 History",
+        "referral": "👥 Referral",
+        "deposit": "💳 Deposit",
+        "withdraw": "💸 Withdraw",
+        "support": "🆘 Support",
+        "faq": "ℹ️ FAQ",
+        "update": "🔄 Update",
+        "developer": "👨‍💻 Developer",
+        "lang": "🌐 Language",
+        "admin": "🔧 Admin Panel",
+    },
+    "en": {
+        "wallet": "💰 Wallet",
+        "profile": "👤 Profile",
+        "market": "🛒 Market",
+        "sell": "📤 Sell",
+        "my_products": "📦 My Products",
+        "orders": "🧾 Orders",
+        "history": "📜 History",
+        "referral": "👥 Referral",
+        "deposit": "💳 Deposit",
+        "withdraw": "💸 Withdraw",
+        "support": "🆘 Support",
+        "faq": "ℹ️ FAQ",
+        "update": "🔄 Update",
+        "developer": "👨‍💻 Developer",
+        "lang": "🌐 Language",
+        "admin": "🔧 Admin Panel",
+    },
+}
+
+
+def user_kb(show_admin=False, lang="bn"):
+    m = MENU.get(lang) or MENU["bn"]
     rows = [
-        ["💰 Wallet", "👤 Profile"],
-        ["🛒 Market", "📤 Sell"],
-        ["📦 My Products", "🧾 Orders"],
-        ["📜 History", "👥 Referral"],
-        ["💳 Deposit", "💸 Withdraw"],
-        ["🆘 Support", "ℹ️ FAQ"],
-        ["🔄 Update", "👨‍💻 Developer"],
+        [m["wallet"], m["profile"]],
+        [m["market"], m["sell"]],
+        [m["my_products"], m["orders"]],
+        [m["history"], m["referral"]],
+        [m["deposit"], m["withdraw"]],
+        [m["support"], m["faq"]],
+        [m["update"], m["developer"]],
+        [m["lang"]],
     ]
     if show_admin:
-        rows.append(["🔧 Admin Panel"])
+        rows.append([m["admin"]])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -570,7 +661,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         get_setting("welcome_text"),
         parse_mode=ParseMode.HTML,
-        reply_markup=user_kb(is_admin(user.id)),
+        reply_markup=user_kb(is_admin(user.id), get_user_lang(user.id)),
     )
 
 
@@ -1572,15 +1663,15 @@ async def deposit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     for m in methods:
         try:
-            mm = float(m["min_amount"] or 0)
+            row_min = float(m["min_amount"] or 0)
         except Exception:
-            mm = 0
-        effective = mm if mm > 0 else default_min
-        label = f"{m['name']} (min {effective:.0f}৳)"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"dep_{m['id']}")])
+            row_min = 0
+        effective = resolve_method_min(m["name"], row_min)
+        label = "%s (min %.0f)" % (m["name"], effective)
+        buttons.append([InlineKeyboardButton(label, callback_data="dep_%s" % m["id"])])
     if get_setting("gateway_enabled") == "1":
         buttons.append(
-            [InlineKeyboardButton("⚡ Auto Gateway", callback_data="dep_gw")]
+            [InlineKeyboardButton("Auto Gateway (min 10+)", callback_data="dep_gw")]
         )
     await update.message.reply_text(
         "💳 <b>Deposit</b>\nপ্রতি মেথডের নিজস্ব minimum আলাদা।\nমেথড বেছে নিন:",
@@ -1602,9 +1693,11 @@ async def dep_method_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("API Key নেই। Admin → Gateway Keys এ সেট করুন।")
             return ConversationHandler.END
         try:
-            gmin = float(get_setting("gateway_min") or get_setting("min_deposit") or 50)
+            gmin = float(get_setting("gateway_min") or 10)
         except Exception:
-            gmin = 50.0
+            gmin = 10.0
+        if gmin < 10:
+            gmin = 10.0
         context.user_data["dep_gw"] = True
         context.user_data["dep_min"] = gmin
         await q.edit_message_text(
@@ -1623,14 +1716,10 @@ async def dep_method_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["dep_method"] = m["name"]
     context.user_data["dep_info"] = m["info"]
     try:
-        mmin = float(m["min_amount"] or 0)
+        row_min = float(m["min_amount"] or 0)
     except Exception:
-        mmin = 0
-    if mmin <= 0:
-        try:
-            mmin = float(get_setting("min_deposit", "50") or 50)
-        except Exception:
-            mmin = 50
+        row_min = 0
+    mmin = resolve_method_min(m["name"], row_min)
     context.user_data["dep_min"] = mmin
     await q.edit_message_text(
         f"মেথড: <b>{m['name']}</b>\n\n{m['info']}\n\n"
@@ -1813,21 +1902,29 @@ async def dep_gw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    kb = InlineKeyboardMarkup(
-        (
-            [[InlineKeyboardButton("Pay Now", url=pay_url), InlineKeyboardButton("I Paid Verify", callback_data="gwver_%s" % dep_id)]]
-            if pay_url
-            else [[InlineKeyboardButton("Verify", callback_data="gwver_%s" % dep_id)]]
-        )
-    )
     if pay_url:
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Pay Now", url=pay_url)],
+                [InlineKeyboardButton("I Paid - Verify", callback_data="gwver_%s" % dep_id)],
+            ]
+        )
+    else:
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Verify", callback_data="gwver_%s" % dep_id)]]
+        )
+    if pay_url:
+        uname = (u.full_name or u.username or str(uid))
         msg = (
-            "পেমেন্ট লিংক তৈরি হয়েছে।\n"
-            "Amount: <b>%.2f</b> BDT\n"
-            "Ref: <code>%s</code>\n\n"
-            "1) লিংকে গিয়ে পে করুন\n"
-            "2) শেষে Verify চাপুন"
-        ) % (amt, trx)
+            "<b>Payment Details</b>\n"
+            "====================\n"
+            "Payment created successfully\n"
+            "Name: %s\n"
+            "User ID: %s\n"
+            "Pay Amount: %.2f BDT\n"
+            "Nicher Pay Now button e click korun.\n"
+            "===================="
+        ) % (uname, uid, amt)
     else:
         msg = (
             "পেমেন্ট লিংক আসেনি (HTTP %s).\n"
@@ -2243,7 +2340,9 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"বাটন দিয়ে এডিট করুন:"
     )
     buttons = [
-        [InlineKeyboardButton("Min Deposit", callback_data="set_min_deposit")],
+        [InlineKeyboardButton("Min Deposit (default)", callback_data="set_min_deposit")],
+        [InlineKeyboardButton("Binance Min Deposit", callback_data="set_min_deposit_binance")],
+        [InlineKeyboardButton("Mobile Banking Min", callback_data="set_min_deposit_mobile")],
         [InlineKeyboardButton("Admin Commission %", callback_data="set_admin_commission_percent")],
         [InlineKeyboardButton("Referral Shop %", callback_data="set_referral_shop_percent")],
         [InlineKeyboardButton("Developer Username", callback_data="set_developer_username")],
@@ -2559,6 +2658,23 @@ async def cat_add_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== ROUTER ==================
 
+async def lang_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    lang = "bn" if q.data.endswith("bn") else "en"
+    uid = q.from_user.id
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET lang=? WHERE user_id=?", (lang, uid))
+    conn.commit()
+    conn.close()
+    msg = "ভাষা বাংলা করা হয়েছে।" if lang == "bn" else "Language set to English."
+    await q.edit_message_text(msg)
+    await context.bot.send_message(
+        uid, msg, reply_markup=user_kb(is_admin(uid), lang)
+    )
+
+
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     conn = get_db()
@@ -2839,6 +2955,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await profile_cmd(update, context)
     elif text == "📜 History":
         await history_cmd(update, context)
+    elif text in ("🌐 Language", "Language"):
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("বাংলা", callback_data="lang_bn")],
+            [InlineKeyboardButton("English", callback_data="lang_en")],
+        ])
+        await update.message.reply_text("ভাষা / Language:", reply_markup=kb)
     elif text == "🔄 Update":
         await update_cmd(update, context)
     elif text == "👨‍💻 Developer":
@@ -3033,7 +3155,7 @@ def main():
         entry_points=[
             CallbackQueryHandler(
                 set_field_cb,
-                pattern=r"^(set_min_deposit|set_min_withdraw|set_support_username|set_faq_text|set_gateway_nagorik_api|set_gateway_nagorik_secret|set_admin_commission_percent|set_gateway_rupantor_api|set_gateway_rupantor_secret|set_gateway_daweblab_api|set_gateway_daweblab_secret|set_referral_shop_percent|set_developer_username|set_developer_prefill|set_update_text|set_gateway_api_key|set_gateway_secret|set_gateway_header_name|set_gateway_create_url|set_gateway_verify_url|set_gateway_name|set_gateway_min)$",
+                pattern=r"^(set_min_deposit|set_min_deposit_binance|set_min_deposit_mobile|set_min_withdraw|set_support_username|set_faq_text|set_gateway_nagorik_api|set_gateway_nagorik_secret|set_admin_commission_percent|set_gateway_rupantor_api|set_gateway_rupantor_secret|set_gateway_daweblab_api|set_gateway_daweblab_secret|set_referral_shop_percent|set_developer_username|set_developer_prefill|set_update_text|set_gateway_api_key|set_gateway_secret|set_gateway_header_name|set_gateway_create_url|set_gateway_verify_url|set_gateway_name|set_gateway_min)$",
             )
         ],
         states={
@@ -3078,6 +3200,7 @@ def main():
     app.add_handler(CallbackQueryHandler(prod_cb, pattern=r"^prod_\d+$"))
     app.add_handler(CallbackQueryHandler(buy_cb, pattern=r"^buy_\d+$"))
     app.add_handler(CallbackQueryHandler(gw_verify_cb, pattern=r"^gwver_\d+$"))
+    app.add_handler(CallbackQueryHandler(lang_cb, pattern=r"^lang_(bn|en)$"))
     app.add_handler(CallbackQueryHandler(delivery_cb, pattern=r"^dlv_\d+$"))
     app.add_handler(CallbackQueryHandler(myprod_cb, pattern=r"^myprod_\d+$"))
     app.add_handler(CallbackQueryHandler(ptog_cb, pattern=r"^ptog_\d+$"))
