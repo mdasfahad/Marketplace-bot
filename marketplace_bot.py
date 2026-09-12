@@ -201,8 +201,11 @@ def init_db():
             "শুধু বৈধ ডিজিটাল প্রোডাক্ট সেল করুন।"
         ),
         "welcome_text": "🛒 <b>Digital Marketplace</b>\nবৈধ ডিজিটাল প্রোডাক্ট কিনুন ও বিক্রি করুন।",
+        "admin_commission_percent": "10",
         "gateway_nagorik_api": "",
         "gateway_nagorik_secret": "",
+        "gateway_rupantor_api": "",
+        "gateway_rupantor_secret": "",
         "gateway_enabled": "0",
         "maintenance": "0",
     }
@@ -230,16 +233,7 @@ def init_db():
                 "INSERT INTO categories (name, emoji) VALUES (?, ?)", (name, emoji)
             )
 
-    cur.execute("SELECT COUNT(*) c FROM payment_methods")
-    if cur.fetchone()["c"] == 0:
-        for name, info in [
-            ("bKash", "Personal: 01XXXXXXXXX\nReference: your user id"),
-            ("Nagad", "Personal: 01XXXXXXXXX\nReference: your user id"),
-            ("Rocket", "Personal: 01XXXXXXXXX"),
-        ]:
-            cur.execute(
-                "INSERT INTO payment_methods (name, info) VALUES (?, ?)", (name, info)
-            )
+    # payment methods: admin sets up manually (no default seed)
 
     conn.commit()
     conn.close()
@@ -343,11 +337,12 @@ def add_balance(uid: int, amount: float, note: str = ""):
 
 def user_kb(show_admin=False):
     rows = [
-        ["💰 Wallet", "🛒 Market"],
-        ["📤 Sell", "📦 My Products"],
-        ["🧾 Orders", "👥 Referral"],
-        ["💳 Deposit", "💸 Withdraw"],
-        ["🆘 Support", "ℹ️ FAQ"],
+        ["💰 Wallet", "👤 Profile"],
+        ["🛒 Market", "📤 Sell"],
+        ["📦 My Products", "🧾 Orders"],
+        ["👥 Referral", "💳 Deposit"],
+        ["💸 Withdraw", "🆘 Support"],
+        ["ℹ️ FAQ"],
     ]
     if show_admin:
         rows.append(["🔧 Admin Panel"])
@@ -576,6 +571,36 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================== WALLET ==================
+async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    u = get_user(uid)
+    if not u:
+        ensure_user(uid, update.effective_user.username, update.effective_user.full_name)
+        u = get_user(uid)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) c FROM users WHERE referrer_id=?", (uid,))
+    refs = cur.fetchone()["c"]
+    cur.execute("SELECT COUNT(*) c FROM orders WHERE buyer_id=?", (uid,))
+    buys = cur.fetchone()["c"]
+    cur.execute("SELECT COUNT(*) c FROM orders WHERE seller_id=?", (uid,))
+    sales = cur.fetchone()["c"]
+    conn.close()
+    status = "🚫 Blocked / Inactive" if u["is_blocked"] else "✅ Active"
+    await update.message.reply_text(
+        f"👤 <b>Profile</b>\n\n"
+        f"🆔 User ID: <code>{uid}</code>\n"
+        f"👤 Username: @{u['username'] or '-'}\n"
+        f"📝 Name: {u['full_name'] or '-'}\n"
+        f"💰 Balance: <b>{u['balance']:.2f}</b> BDT\n"
+        f"📅 Joined: {u['joined_at'] or '-'}\n"
+        f"👥 Referrals: {refs}\n"
+        f"🛒 Purchases: {buys} | 📤 Sales: {sales}\n"
+        f"📊 Status: {status}",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = get_user(update.effective_user.id)
     bal = u["balance"] if u else 0
@@ -1747,6 +1772,7 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚙️ <b>Settings</b>\n"
         f"Min deposit: {get_setting('min_deposit')}\n"
         f"Min withdraw: {get_setting('min_withdraw')}\n"
+        f"Commission: {get_setting('admin_commission_percent','10')}%\n"
         f"Support: @{get_setting('support_username') or '-'}\n"
         f"Gateway: {get_setting('gateway_enabled')}\n"
         f"Maintenance: {get_setting('maintenance')}\n\n"
@@ -1799,22 +1825,28 @@ async def set_value_recv(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def gateway_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    text = (
-        "🔑 <b>Payment Gateway</b>\n\n"
-        "NagorikPay (উদাহরণ):\n"
-        f"API Key: <code>{get_setting('gateway_nagorik_api') or '(empty)'}</code>\n"
-        f"Secret: <code>{(get_setting('gateway_nagorik_secret') or '(empty)')[:8]}...</code>\n"
-        f"Enabled: {get_setting('gateway_enabled')}\n\n"
-        "Affiliate লিংক দিয়ে অটো পেমেন্ট হয় না — মার্চেন্ট API Key লাগে।\n"
-        "কী সেট করতে বাটন চাপুন:"
+    body = (
+        "🔑 <b>Merchant Payment Gateways</b>\n\n"
+        "<b>1) NagorikPay</b>\n"
+        f"API: <code>{get_setting('gateway_nagorik_api') or '(empty)'}</code>\n"
+        f"Secret: <code>{(get_setting('gateway_nagorik_secret') or '(empty)')[:12]}</code>\n\n"
+        "<b>2) RupantorPay</b> (getway.daweblab.com)\n"
+        f"API: <code>{get_setting('gateway_rupantor_api') or '(empty)'}</code>\n"
+        f"Secret: <code>{(get_setting('gateway_rupantor_secret') or '(empty)')[:12]}</code>\n\n"
+        f"Gateway master: {get_setting('gateway_enabled')}\n\n"
+        "📌 Affiliate লিংক দিয়ে অটো পেমেন্ট হয় না।\n"
+        "মার্চেন্ট প্যানেল থেকে API Key/Secret নিয়ে এখানে সেট করুন।\n"
+        "ম্যানুয়াল bKash/Nagad → Payment Methods মেনু।"
     )
     buttons = [
-        [InlineKeyboardButton("Set API Key", callback_data="set_gateway_nagorik_api")],
-        [InlineKeyboardButton("Set Secret", callback_data="set_gateway_nagorik_secret")],
+        [InlineKeyboardButton("Nagorik API", callback_data="set_gateway_nagorik_api")],
+        [InlineKeyboardButton("Nagorik Secret", callback_data="set_gateway_nagorik_secret")],
+        [InlineKeyboardButton("Rupantor API", callback_data="set_gateway_rupantor_api")],
+        [InlineKeyboardButton("Rupantor Secret", callback_data="set_gateway_rupantor_secret")],
         [InlineKeyboardButton("Toggle Gateway ON/OFF", callback_data="tog_gw")],
     ]
     await update.message.reply_text(
-        text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons)
+        body, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
@@ -1866,24 +1898,35 @@ async def payment_methods_admin(update: Update, context: ContextTypes.DEFAULT_TY
         return
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM payment_methods")
+    cur.execute("SELECT * FROM payment_methods ORDER BY id")
     rows = cur.fetchall()
     conn.close()
-    text = "💳 Payment Methods\n\n"
+    body = (
+        "💳 <b>Payment Methods (ম্যানুয়াল)</b>\n\n"
+        "<b>সেটআপ গাইড:</b>\n"
+        "1) ➕ Add Method\n"
+        "2) নাম: bKash / Nagad / Rocket / Upay / Binance Pay\n"
+        "3) ইনফো উদাহরণ:\n"
+        "<code>Number: 01XXXXXXXXX\n"
+        "Type: Personal / Send Money\n"
+        "Note: Payment এ User ID লিখুন</code>\n\n"
+        "অটো গেটওয়ে → 🔑 Gateway Keys\n\n"
+    )
     buttons = []
+    if not rows:
+        body += "⚠️ কোনো মেথড নেই — আগে Add করুন।\n"
     for m in rows:
-        text += f"#{m['id']} {m['name']} active={m['is_active']}\n{m['info'][:80]}\n\n"
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    f"{'⏸' if m['is_active'] else '▶️'} {m['name']}",
-                    callback_data=f"pmtog_{m['id']}",
-                )
-            ]
-        )
+        body += f"#{m['id']} <b>{m['name']}</b> [{'ON' if m['is_active'] else 'OFF'}]\n{m['info'][:70]}\n\n"
+        buttons.append([
+            InlineKeyboardButton(
+                f"{'⏸' if m['is_active'] else '▶️'} {m['name']}",
+                callback_data=f"pmtog_{m['id']}",
+            ),
+            InlineKeyboardButton("🗑", callback_data=f"pmdel_{m['id']}"),
+        ])
     buttons.append([InlineKeyboardButton("➕ Add Method", callback_data="pm_add")])
     await update.message.reply_text(
-        text, reply_markup=InlineKeyboardMarkup(buttons)
+        body, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
@@ -1908,13 +1951,21 @@ async def pm_add_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     if not is_admin(q.from_user.id):
         return
-    await q.edit_message_text("মেথডের নাম (যেমন bKash):")
+    await q.edit_message_text(
+        "মেথডের নাম লিখুন:\n"
+        "উদাহরণ: bKash, Nagad, Rocket, Upay, Binance Pay"
+    )
     return ADD_PAY_NAME
 
 
 async def pm_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["pm_name"] = update.message.text.strip()[:40]
-    await update.message.reply_text("ইনফো / নম্বর লিখুন:")
+    await update.message.reply_text(
+        "ইনফো লিখুন — উদাহরণ:\n"
+        "Number: 01XXXXXXXXX\n"
+        "Type: Personal\n"
+        "Note: User ID লিখুন"
+    )
     return ADD_PAY_INFO
 
 
@@ -2046,6 +2097,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "💰 Wallet":
         await wallet(update, context)
+    elif text == "👤 Profile":
+        await profile_cmd(update, context)
     elif text == "🛒 Market":
         await market(update, context)
     elif text == "👥 Referral":
@@ -2177,7 +2230,7 @@ def main():
         entry_points=[
             CallbackQueryHandler(
                 set_field_cb,
-                pattern=r"^(set_min_deposit|set_min_withdraw|set_support_username|set_faq_text|set_gateway_nagorik_api|set_gateway_nagorik_secret|set_admin_commission_percent)$",
+                pattern=r"^(set_min_deposit|set_min_withdraw|set_support_username|set_faq_text|set_gateway_nagorik_api|set_gateway_nagorik_secret|set_admin_commission_percent|set_gateway_rupantor_api|set_gateway_rupantor_secret)$",
             )
         ],
         states={
