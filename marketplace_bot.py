@@ -2415,6 +2415,11 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text or "খালি")
 
 
+async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Alias — Settings button"""
+    return await admin_settings(update, context)
+
+
 async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -2878,6 +2883,23 @@ async def developer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
+async def _bal_add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await admin_bal_start(update, context, "add")
+
+
+async def _bal_rm_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await admin_bal_start(update, context, "remove")
+
+
+async def _block_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await block_user_start(update, context, True)
+
+
+async def _unblock_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await block_user_start(update, context, False)
+
+
 async def admin_bal_start(update: Update, context: ContextTypes.DEFAULT_TYPE, mode="add"):
     if not is_admin(update.effective_user.id):
         return
@@ -2982,18 +3004,17 @@ async def _handle_text_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # --- Admin buttons FIRST (before user menu match) ---
     if is_admin(uid):
-        # Admin panel buttons (must run before user menu match)
-        if "Referral Bonus" in text or text.endswith("Referral Bonus"):
+        if "Referral Bonus" in text:
             await ref_bonus_prompt(update, context)
             return
-        if text == "💸 Withdrawals" or text.endswith("Withdrawals"):
+        if text.endswith("Withdrawals") or text == "💸 Withdrawals":
             await admin_withdrawals(update, context)
             return
-        if text == "📥 Deposits" or text.endswith("Deposits"):
+        if text.endswith("Deposits") or text == "📥 Deposits":
             await admin_deposits(update, context)
             return
-        if text == "📢 Broadcast" or text.endswith("Broadcast"):
-            return  # bc_conv entry handles
+        if text.endswith("Broadcast") or text == "📢 Broadcast":
+            return  # bc_conv
         if text == "🔑 Gateway Keys":
             await gateway_keys(update, context)
             return
@@ -3001,14 +3022,60 @@ async def _handle_text_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await payment_methods_admin(update, context)
             return
         if text == "⚙️ Settings":
-            await settings_menu(update, context)
+            await admin_settings(update, context)
             return
-        if text == "🏠 User Panel":
+        if text == "🏠 User Panel" or text == "🏠 ইউজার প্যানেল":
             context.user_data["in_admin"] = False
             await update.message.reply_text(
                 "User Panel",
                 reply_markup=user_kb(True, get_user_lang(uid)),
             )
+            return
+        if text == "👥 Users":
+            await admin_users(update, context)
+            return
+        if text == "📊 Stats":
+            await admin_stats(update, context)
+            return
+        if text == "🛍️ All Products":
+            await admin_products(update, context)
+            return
+        if text == "📂 Categories":
+            await categories_admin(update, context)
+            return
+        if text == "📄 Export Users":
+            await export_users(update, context)
+            return
+        if text == "📢 Force Channels":
+            await force_channels_menu(update, context)
+            return
+        if text == "🤖 Bot ON/OFF":
+            await toggle_bot(update, context)
+            return
+        if text == "💸 WD ON/OFF":
+            await toggle_wd(update, context)
+            return
+        if text == "💵 Add Balance":
+            return await admin_bal_start(update, context, "add")
+        if text == "💵 Remove Balance":
+            return await admin_bal_start(update, context, "remove")
+        if text == "🚫 Block User":
+            return await block_user_start(update, context, True)
+        if text == "✅ Unblock User":
+            return await block_user_start(update, context, False)
+        if text == "➕ Admin Add Product":
+            return await sell_start(update, context)
+        if text == "👑 Add Admin" and is_main(uid):
+            context.user_data["await_add_admin"] = True
+            await update.message.reply_text("Admin User ID:")
+            return
+        if text == "🗑️ Remove Admin" and is_main(uid):
+            context.user_data["await_rm_admin"] = True
+            await update.message.reply_text("Remove Admin User ID:")
+            return
+        if text == "🔄 Ownership Transfer" and is_main(uid):
+            context.user_data["await_transfer"] = True
+            await update.message.reply_text("New Main Admin User ID:")
             return
 
     if context.user_data.get("await_cat_name") and is_admin(uid):
@@ -3204,51 +3271,9 @@ async def _handle_text_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await withdraw_start(update, context)
 
 
-    elif text in ("🔧 Admin Panel", "🔧 অ্যাডমিন প্যানেল", "🔧 एडमिन पैनल", "🔧 لوحة الإدارة") and is_admin(uid):
+    if text in ("🔧 Admin Panel", "🔧 অ্যাডমিন প্যানেল", "🔧 एडमिन पैनल", "🔧 لوحة الإدارة") and is_admin(uid):
         await admin_panel(update, context)
-    elif text in ("🏠 User Panel", "🏠 ইউজার প্যানেল"):
-        await update.message.reply_text("User Panel", reply_markup=user_kb(is_admin(uid)))
-    elif text == "👥 Users" and is_admin(uid):
-        await admin_users(update, context)
-    elif text == "📊 Stats" and is_admin(uid):
-        await admin_stats(update, context)
-    elif text == "📥 Deposits" and is_admin(uid):
-        await admin_deposits(update, context)
-    elif text == "💸 Withdrawals" and is_admin(uid):
-        await admin_withdrawals(update, context)
-    elif text == "🛍️ All Products" and is_admin(uid):
-        await admin_products(update, context)
-    elif text == "📂 Categories" and is_admin(uid):
-        await categories_admin(update, context)
-    elif text == "💳 Payment Methods" and is_admin(uid):
-        await payment_methods_admin(update, context)
-    elif text == "💵 Add Balance" and is_admin(uid):
-        return await admin_bal_start(update, context, "add")
-    elif text == "💵 Remove Balance" and is_admin(uid):
-        return await admin_bal_start(update, context, "remove")
-    elif text == "🚫 Block User" and is_admin(uid):
-        return await block_user_start(update, context, True)
-    elif text == "✅ Unblock User" and is_admin(uid):
-        return await block_user_start(update, context, False)
-    elif text == "⚙️ Settings" and is_admin(uid):
-        await admin_settings(update, context)
-    elif text == "🔑 Gateway Keys" and is_admin(uid):
-        await gateway_keys(update, context)
-    elif text == "📄 Export Users" and is_admin(uid):
-        await export_users(update, context)
-    elif text == "📢 Force Channels" and is_admin(uid):
-        await force_channels_menu(update, context)
-    elif ("Referral Bonus" in text) and is_admin(uid):
-        await ref_bonus_prompt(update, context)
-    elif text == "🤖 Bot ON/OFF" and is_admin(uid):
-        await toggle_bot(update, context)
-    elif text == "💸 WD ON/OFF" and is_admin(uid):
-        await toggle_wd(update, context)
-    elif text == "➕ Admin Add Product" and is_admin(uid):
-        await update.message.reply_text(
-            "➕ Admin Product\nনিচের Sell ফ্লো শুরু হচ্ছে — ক্যাটাগরি বেছে নিন।"
-        )
-        return await sell_start(update, context)
+        return
 
 
 
@@ -3276,8 +3301,8 @@ def main():
 
     bal_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex("^💵 Add Balance$"), lambda u,c: admin_bal_start(u,c,"add")),
-            MessageHandler(filters.Regex("^💵 Remove Balance$"), lambda u,c: admin_bal_start(u,c,"remove")),
+            MessageHandler(filters.Regex("^💵 Add Balance$"), _bal_add_entry),
+            MessageHandler(filters.Regex("^💵 Remove Balance$"), _bal_rm_entry),
         ],
         states={
             BAL_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_bal_user)],
@@ -3289,8 +3314,8 @@ def main():
 
     block_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex("^🚫 Block User$"), lambda u,c: block_user_start(u,c,True)),
-            MessageHandler(filters.Regex("^✅ Unblock User$"), lambda u,c: block_user_start(u,c,False)),
+            MessageHandler(filters.Regex("^🚫 Block User$"), _block_entry),
+            MessageHandler(filters.Regex("^✅ Unblock User$"), _unblock_entry),
         ],
         states={
             BLOCK_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, block_user_id)],
