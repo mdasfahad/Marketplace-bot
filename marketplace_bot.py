@@ -592,64 +592,50 @@ MENU = {
 
 def match_menu_action(label: str) -> str:
     t = (label or "").strip()
+    if not t:
+        return ""
+    # exact match against all language menus
     for lang_map in MENU.values():
         for key, val in lang_map.items():
             if t == val:
                 return key
-    # emoji-prefix fallback (if text slightly differs)
-    for lang_map in MENU.values():
-        for key, val in lang_map.items():
-            if t.endswith(val[2:].strip()) or val.endswith(t[2:].strip() if len(t) > 2 else t):
-                if t[:2] == val[:2] or (len(t) > 0 and len(val) > 0 and t[0] == val[0]):
-                    # stronger: first emoji/word match
-                    pass
+    # exact legacy labels only (no substring — avoids "Referral Bonus" -> referral)
     legacy = {
         "💰 Wallet": "wallet",
+        "💰 ওয়ালেট": "wallet",
+        "💰 ওয়ালেট": "wallet",
         "👤 Profile": "profile",
+        "👤 প্রোফাইল": "profile",
         "🛒 Market": "market",
+        "🛒 মার্কেট": "market",
         "📤 Sell": "sell",
+        "📤 সেল": "sell",
         "📦 My Products": "my_products",
+        "📦 আমার প্রোডাক্ট": "my_products",
         "🧾 Orders": "orders",
+        "🧾 অর্ডার": "orders",
         "📜 History": "history",
+        "📜 হিস্টরি": "history",
         "👥 Referral": "referral",
+        "👥 রেফারাল": "referral",
         "💳 Deposit": "deposit",
+        "💳 ডিপোজিট": "deposit",
         "💸 Withdraw": "withdraw",
+        "💸 উইথড্র": "withdraw",
         "🆘 Support": "support",
+        "🆘 সাপোর্ট": "support",
         "ℹ️ FAQ": "faq",
         "🔄 Update": "update",
+        "🔄 আপডেট": "update",
         "👨‍💻 Developer": "developer",
+        "👨‍💻 ডেভেলপার": "developer",
         "🌐 Language": "lang",
         "🌐 ভাষা": "lang",
         "🔧 Admin Panel": "admin",
         "🔧 অ্যাডমিন প্যানেল": "admin",
         "🏠 User Panel": "user_panel",
     }
-    if t in legacy:
-        return legacy[t]
-    # contains match by key words
-    low = t.lower()
-    checks = [
-        ("wallet", "wallet"), ("ওয়ালেট", "wallet"), ("ওয়ালেট", "wallet"),
-        ("profile", "profile"), ("প্রোফাইল", "profile"),
-        ("market", "market"), ("মার্কেট", "market"),
-        ("sell", "sell"), ("সেল", "sell"),
-        ("my product", "my_products"), ("আমার প্রোডাক্ট", "my_products"),
-        ("order", "orders"), ("অর্ডার", "orders"),
-        ("history", "history"), ("হিস্টরি", "history"),
-        ("referral", "referral"), ("রেফার", "referral"),
-        ("deposit", "deposit"), ("ডিপোজিট", "deposit"),
-        ("withdraw", "withdraw"), ("উইথড্র", "withdraw"),
-        ("support", "support"), ("সাপোর্ট", "support"),
-        ("faq", "faq"),
-        ("update", "update"), ("আপডেট", "update"),
-        ("developer", "developer"), ("ডেভেলপার", "developer"),
-        ("language", "lang"), ("ভাষা", "lang"),
-        ("admin", "admin"), ("অ্যাডমিন", "admin"),
-    ]
-    for needle, key in checks:
-        if needle in low or needle in t:
-            return key
-    return ""
+    return legacy.get(t, "")
 
 
 def user_kb(show_admin=False, lang="bn"):
@@ -2542,17 +2528,48 @@ async def tog_gw_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return ConversationHandler.END
+    context.user_data["bc_items"] = []
     await update.message.reply_text(
-        "📢 সব ইউজারকে কী পাঠাবেন? (টেক্সট):",
+        "Broadcast: text / photo / video pathan.\n"
+        "Onekgulo ekta ekta kore pathate paren.\n"
+        "Shesh hole /done likhun. Cancel: /cancel",
         reply_markup=ReplyKeyboardRemove(),
     )
     return BROADCAST_MSG
 
 
-async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def broadcast_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return ConversationHandler.END
-    msg = update.message.text
+    items = context.user_data.setdefault("bc_items", [])
+    msg = update.message
+    if msg.text and msg.text.strip() in ("/done", "done", "Done", "/DONE"):
+        return await broadcast_flush(update, context)
+    if msg.photo:
+        items.append({"type": "photo", "file_id": msg.photo[-1].file_id, "caption": msg.caption or ""})
+        await update.message.reply_text("Photo add hoise. Aro pathan ba /done")
+        return BROADCAST_MSG
+    if msg.video:
+        items.append({"type": "video", "file_id": msg.video.file_id, "caption": msg.caption or ""})
+        await update.message.reply_text("Video add hoise. Aro pathan ba /done")
+        return BROADCAST_MSG
+    if msg.document:
+        items.append({"type": "document", "file_id": msg.document.file_id, "caption": msg.caption or ""})
+        await update.message.reply_text("File add hoise. Aro pathan ba /done")
+        return BROADCAST_MSG
+    if msg.text:
+        items.append({"type": "text", "text": msg.text})
+        await update.message.reply_text("Text add hoise. Aro pathan ba /done")
+        return BROADCAST_MSG
+    await update.message.reply_text("Text/Photo/Video pathan ba /done")
+    return BROADCAST_MSG
+
+
+async def broadcast_flush(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    items = context.user_data.get("bc_items") or []
+    if not items:
+        await update.message.reply_text("Kichu add hoy nai.", reply_markup=admin_kb())
+        return ConversationHandler.END
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT user_id FROM users WHERE is_blocked=0")
@@ -2561,15 +2578,25 @@ async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok = fail = 0
     for uid in users:
         try:
-            await context.bot.send_message(uid, f"📢 {msg}")
+            for it in items:
+                if it["type"] == "text":
+                    await context.bot.send_message(uid, "📢 " + it["text"])
+                elif it["type"] == "photo":
+                    await context.bot.send_photo(uid, it["file_id"], caption=it.get("caption") or None)
+                elif it["type"] == "video":
+                    await context.bot.send_video(uid, it["file_id"], caption=it.get("caption") or None)
+                elif it["type"] == "document":
+                    await context.bot.send_document(uid, it["file_id"], caption=it.get("caption") or None)
             ok += 1
         except Exception:
             fail += 1
+    context.user_data.pop("bc_items", None)
     await update.message.reply_text(
-        f"Broadcast done. OK={ok} Fail={fail}",
+        "Broadcast done. OK=%s Fail=%s Items=%s" % (ok, fail, len(items)),
         reply_markup=admin_kb(),
     )
     return ConversationHandler.END
+
 
 
 async def payment_methods_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2953,6 +2980,37 @@ async def _handle_text_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("🔧 Maintenance")
         return
 
+    # --- Admin buttons FIRST (before user menu match) ---
+    if is_admin(uid):
+        # Admin panel buttons (must run before user menu match)
+        if "Referral Bonus" in text or text.endswith("Referral Bonus"):
+            await ref_bonus_prompt(update, context)
+            return
+        if text == "💸 Withdrawals" or text.endswith("Withdrawals"):
+            await admin_withdrawals(update, context)
+            return
+        if text == "📥 Deposits" or text.endswith("Deposits"):
+            await admin_deposits(update, context)
+            return
+        if text == "📢 Broadcast" or text.endswith("Broadcast"):
+            return  # bc_conv entry handles
+        if text == "🔑 Gateway Keys":
+            await gateway_keys(update, context)
+            return
+        if text == "💳 Payment Methods":
+            await payment_methods_admin(update, context)
+            return
+        if text == "⚙️ Settings":
+            await settings_menu(update, context)
+            return
+        if text == "🏠 User Panel":
+            context.user_data["in_admin"] = False
+            await update.message.reply_text(
+                "User Panel",
+                reply_markup=user_kb(True, get_user_lang(uid)),
+            )
+            return
+
     if context.user_data.get("await_cat_name") and is_admin(uid):
         context.user_data.pop("await_cat_name", None)
         name = text.strip()[:40]
@@ -3109,11 +3167,16 @@ async def _handle_text_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await referral_cmd(update, context)
         return
     if action == "support":
-        uname = get_setting("support_username") or ""
+        uname = (get_setting("support_username") or "").strip().lstrip("@")
         if uname:
-            await update.message.reply_text("Support: @" + uname.lstrip("@"))
+            await update.message.reply_text(
+                "🆘 Support",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("💬 Contact Support", url="https://t.me/%s" % uname)]]
+                ),
+            )
         else:
-            await update.message.reply_text("Support set nai.")
+            await update.message.reply_text("Support username set nai. Admin Settings e set korun.")
         return
     if action == "faq":
         await update.message.reply_text(
@@ -3175,7 +3238,7 @@ async def _handle_text_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await export_users(update, context)
     elif text == "📢 Force Channels" and is_admin(uid):
         await force_channels_menu(update, context)
-    elif text == "🎁 Referral Bonus" and is_admin(uid):
+    elif ("Referral Bonus" in text) and is_admin(uid):
         await ref_bonus_prompt(update, context)
     elif text == "🤖 Bot ON/OFF" and is_admin(uid):
         await toggle_bot(update, context)
@@ -3307,10 +3370,14 @@ def main():
         ],
         states={
             BROADCAST_MSG: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_send)
+                MessageHandler(filters.PHOTO, broadcast_collect),
+                MessageHandler(filters.VIDEO, broadcast_collect),
+                MessageHandler(filters.Document.ALL, broadcast_collect),
+                MessageHandler(filters.TEXT, broadcast_collect),
             ],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        allow_reentry=True,
     )
 
     set_conv = ConversationHandler(
